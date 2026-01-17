@@ -49,47 +49,250 @@ st.set_page_config(
 # Custom CSS
 st.markdown("""
 <style>
+    /* Main app styling */
+    .stApp {
+        background: linear-gradient(180deg, #0f1419 0%, #1a1f2e 100%);
+    }
+    
+    /* Header styling */
     .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        color: #1E3A8A;
+        font-size: 2.8rem;
+        font-weight: 700;
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
         margin-bottom: 0.5rem;
+        text-align: center;
     }
+    
     .sub-header {
-        font-size: 1.2rem;
-        color: #6B7280;
+        font-size: 1.1rem;
+        color: #8b95a5;
         margin-bottom: 2rem;
+        text-align: center;
     }
+    
+    /* Card styling */
+    .metric-card {
+        background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%);
+        border: 1px solid #2d3748;
+        border-radius: 12px;
+        padding: 1.2rem;
+        text-align: center;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    }
+    
+    .metric-value {
+        font-size: 2rem;
+        font-weight: 700;
+        color: #667eea;
+    }
+    
+    .metric-label {
+        font-size: 0.85rem;
+        color: #8b95a5;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    
+    /* Grade badges */
     .grade-pass {
-        background-color: #D1FAE5;
-        color: #065F46;
-        padding: 0.25rem 0.75rem;
-        border-radius: 0.375rem;
+        background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+        color: white;
+        padding: 0.35rem 1rem;
+        border-radius: 20px;
         font-weight: 600;
+        font-size: 0.85rem;
+        display: inline-block;
     }
+    
     .grade-merit {
-        background-color: #DBEAFE;
-        color: #1E40AF;
-        padding: 0.25rem 0.75rem;
-        border-radius: 0.375rem;
+        background: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%);
+        color: white;
+        padding: 0.35rem 1rem;
+        border-radius: 20px;
         font-weight: 600;
+        font-size: 0.85rem;
+        display: inline-block;
     }
+    
     .grade-referral {
-        background-color: #FEE2E2;
-        color: #991B1B;
-        padding: 0.25rem 0.75rem;
-        border-radius: 0.375rem;
+        background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);
+        color: white;
+        padding: 0.35rem 1rem;
+        border-radius: 20px;
         font-weight: 600;
+        font-size: 0.85rem;
+        display: inline-block;
     }
-    .ksb-card {
-        border: 1px solid #E5E7EB;
-        border-radius: 0.5rem;
+    
+    /* Sidebar styling */
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #151922 0%, #1a202c 100%);
+        border-right: 1px solid #2d3748;
+    }
+    
+    section[data-testid="stSidebar"] .stMarkdown h2 {
+        color: #e2e8f0;
+        font-size: 1rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        margin-top: 1.5rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 2px solid #667eea;
+    }
+    
+    /* Module selector card */
+    .module-card {
+        background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%);
+        border: 1px solid #667eea;
+        border-radius: 10px;
         padding: 1rem;
-        margin-bottom: 1rem;
+        margin: 0.5rem 0;
     }
-    .stExpander {
-        border: 1px solid #E5E7EB;
-        border-radius: 0.5rem;
+    
+    .module-name {
+        color: #667eea;
+        font-weight: 600;
+        font-size: 0.95rem;
+    }
+    
+    .module-desc {
+        color: #8b95a5;
+        font-size: 0.8rem;
+        margin-top: 0.3rem;
+    }
+    
+    /* KSB list styling */
+    .ksb-category {
+        color: #667eea;
+        font-weight: 600;
+        font-size: 0.85rem;
+        margin-top: 0.8rem;
+        margin-bottom: 0.3rem;
+    }
+    
+    .ksb-item {
+        color: #a0aec0;
+        font-size: 0.75rem;
+        padding: 0.2rem 0;
+        border-left: 2px solid #2d3748;
+        padding-left: 0.5rem;
+        margin: 0.2rem 0;
+    }
+    
+    /* Status indicators */
+    .status-ok {
+        background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+        color: white;
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        margin: 0.3rem 0;
+    }
+    
+    .status-error {
+        background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);
+        color: white;
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        margin: 0.3rem 0;
+    }
+    
+    /* File uploader */
+    .stFileUploader {
+        background: #1e2530;
+        border: 2px dashed #3d4756;
+        border-radius: 12px;
+        padding: 1rem;
+    }
+    
+    .stFileUploader:hover {
+        border-color: #667eea;
+    }
+    
+    /* Buttons */
+    .stButton > button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        padding: 0.75rem 2rem;
+        font-weight: 600;
+        font-size: 1rem;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+    }
+    
+    .stButton > button:disabled {
+        background: #2d3748;
+        box-shadow: none;
+    }
+    
+    /* Progress bar */
+    .stProgress > div > div {
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+    }
+    
+    /* Expanders */
+    .streamlit-expanderHeader {
+        background: #1e2530;
+        border-radius: 8px;
+        border: 1px solid #2d3748;
+    }
+    
+    .streamlit-expanderHeader:hover {
+        border-color: #667eea;
+    }
+    
+    /* Info boxes */
+    .stAlert {
+        background: #1e2530;
+        border: 1px solid #2d3748;
+        border-radius: 10px;
+    }
+    
+    /* Divider */
+    hr {
+        border-color: #2d3748;
+        margin: 1.5rem 0;
+    }
+    
+    /* Summary stats cards */
+    .stat-card {
+        background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%);
+        border-radius: 10px;
+        padding: 1rem;
+        text-align: center;
+        border: 1px solid #2d3748;
+    }
+    
+    .stat-number {
+        font-size: 2.5rem;
+        font-weight: 700;
+    }
+    
+    .stat-number.merit { color: #3b82f6; }
+    .stat-number.pass { color: #10b981; }
+    .stat-number.referral { color: #ef4444; }
+    
+    /* Hide Streamlit branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    
+    /* How to use list */
+    .how-to-item {
+        color: #a0aec0;
+        font-size: 0.85rem;
+        padding: 0.3rem 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -384,7 +587,59 @@ def display_grade_badge(grade: str):
 
 def display_ksb_summary_table(evaluations: List[Dict[str, Any]]):
     """Display a summary table of all KSB grades."""
-    st.markdown("### 📊 KSB Grade Summary")
+    
+    # Summary stats at top
+    total = len(evaluations)
+    merits = sum(1 for e in evaluations if e['grade'] == 'MERIT')
+    passes = sum(1 for e in evaluations if e['grade'] == 'PASS')
+    referrals = sum(1 for e in evaluations if e['grade'] == 'REFERRAL')
+    
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); 
+                border-radius: 16px; 
+                padding: 1.5rem; 
+                margin: 1rem 0;
+                border: 1px solid #2d3748;">
+        <h3 style="color: #e2e8f0; margin-bottom: 1rem; text-align: center;">📊 Assessment Summary</h3>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Stats cards
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-number" style="color: #667eea;">{total}</div>
+            <div class="metric-label">Total KSBs</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-number merit">{merits}</div>
+            <div class="metric-label">Merit</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-number pass">{passes}</div>
+            <div class="metric-label">Pass</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col4:
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-number referral">{referrals}</div>
+            <div class="metric-label">Referral</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
     
     # Group by category
     knowledge = [e for e in evaluations if e.get('ksb_category') == 'Knowledge']
@@ -394,35 +649,49 @@ def display_ksb_summary_table(evaluations: List[Dict[str, Any]]):
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.markdown("**Knowledge (K)**")
+        st.markdown("""
+        <div style="background: #1e2530; border-radius: 10px; padding: 1rem; border: 1px solid #2d3748;">
+            <p style="color: #667eea; font-weight: 600; margin-bottom: 0.5rem;">📘 Knowledge</p>
+        </div>
+        """, unsafe_allow_html=True)
         for e in knowledge:
-            grade_emoji = "🟢" if e['grade'] == 'MERIT' else "🟡" if e['grade'] == 'PASS' else "🔴"
-            st.markdown(f"{grade_emoji} **{e['ksb_code']}**: {e['grade']}")
+            grade_color = "#3b82f6" if e['grade'] == 'MERIT' else "#10b981" if e['grade'] == 'PASS' else "#ef4444"
+            st.markdown(f"""
+            <div style="display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #2d3748;">
+                <span style="color: #a0aec0;">{e['ksb_code']}</span>
+                <span style="color: {grade_color}; font-weight: 600;">{e['grade']}</span>
+            </div>
+            """, unsafe_allow_html=True)
     
     with col2:
-        st.markdown("**Skills (S)**")
+        st.markdown("""
+        <div style="background: #1e2530; border-radius: 10px; padding: 1rem; border: 1px solid #2d3748;">
+            <p style="color: #667eea; font-weight: 600; margin-bottom: 0.5rem;">🔧 Skills</p>
+        </div>
+        """, unsafe_allow_html=True)
         for e in skills:
-            grade_emoji = "🟢" if e['grade'] == 'MERIT' else "🟡" if e['grade'] == 'PASS' else "🔴"
-            st.markdown(f"{grade_emoji} **{e['ksb_code']}**: {e['grade']}")
+            grade_color = "#3b82f6" if e['grade'] == 'MERIT' else "#10b981" if e['grade'] == 'PASS' else "#ef4444"
+            st.markdown(f"""
+            <div style="display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #2d3748;">
+                <span style="color: #a0aec0;">{e['ksb_code']}</span>
+                <span style="color: {grade_color}; font-weight: 600;">{e['grade']}</span>
+            </div>
+            """, unsafe_allow_html=True)
     
     with col3:
-        st.markdown("**Behaviours (B)**")
+        st.markdown("""
+        <div style="background: #1e2530; border-radius: 10px; padding: 1rem; border: 1px solid #2d3748;">
+            <p style="color: #667eea; font-weight: 600; margin-bottom: 0.5rem;">💡 Behaviours</p>
+        </div>
+        """, unsafe_allow_html=True)
         for e in behaviours:
-            grade_emoji = "🟢" if e['grade'] == 'MERIT' else "🟡" if e['grade'] == 'PASS' else "🔴"
-            st.markdown(f"{grade_emoji} **{e['ksb_code']}**: {e['grade']}")
-    
-    # Summary stats
-    st.markdown("---")
-    total = len(evaluations)
-    merits = sum(1 for e in evaluations if e['grade'] == 'MERIT')
-    passes = sum(1 for e in evaluations if e['grade'] == 'PASS')
-    referrals = sum(1 for e in evaluations if e['grade'] == 'REFERRAL')
-    
-    stat_cols = st.columns(4)
-    stat_cols[0].metric("Total KSBs", total)
-    stat_cols[1].metric("Merit", merits, delta=None)
-    stat_cols[2].metric("Pass", passes, delta=None)
-    stat_cols[3].metric("Referral", referrals, delta=None if referrals == 0 else f"-{referrals}")
+            grade_color = "#3b82f6" if e['grade'] == 'MERIT' else "#10b981" if e['grade'] == 'PASS' else "#ef4444"
+            st.markdown(f"""
+            <div style="display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #2d3748;">
+                <span style="color: #a0aec0;">{e['ksb_code']}</span>
+                <span style="color: {grade_color}; font-weight: 600;">{e['grade']}</span>
+            </div>
+            """, unsafe_allow_html=True)
 
 
 def display_feedback(results: Dict[str, Any]):
@@ -431,16 +700,33 @@ def display_feedback(results: Dict[str, Any]):
     # Display KSB summary table first
     display_ksb_summary_table(results.get('ksb_evaluations', []))
     
-    st.divider()
+    st.markdown("<br>", unsafe_allow_html=True)
     
     # Display overall summary
-    st.markdown("## 📊 Overall Assessment")
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); 
+                border-radius: 16px; 
+                padding: 1.5rem; 
+                margin: 1rem 0;
+                border: 1px solid #2d3748;">
+        <h3 style="color: #e2e8f0; margin-bottom: 0.5rem;">📝 Overall Assessment</h3>
+    </div>
+    """, unsafe_allow_html=True)
     st.markdown(results.get('overall_summary', 'No summary available.'))
     
-    st.divider()
+    st.markdown("<br>", unsafe_allow_html=True)
     
     # Display per-KSB evaluations
-    st.markdown("## 📋 KSB-by-KSB Evaluation")
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); 
+                border-radius: 16px; 
+                padding: 1.5rem; 
+                margin: 1rem 0;
+                border: 1px solid #2d3748;">
+        <h3 style="color: #e2e8f0; margin-bottom: 0.5rem;">📋 Detailed KSB Evaluations</h3>
+        <p style="color: #8b95a5; font-size: 0.9rem;">Click on each KSB to view detailed feedback</p>
+    </div>
+    """, unsafe_allow_html=True)
     
     for eval_data in results.get('ksb_evaluations', []):
         grade = eval_data.get('grade', 'N/A')
@@ -488,29 +774,35 @@ def main():
     
     # Sidebar
     with st.sidebar:
-        st.markdown("## ⚙️ Configuration")
+        # Logo/Brand area
+        st.markdown("""
+        <div style="text-align: center; padding: 1rem 0;">
+            <span style="font-size: 2.5rem;">🎓</span>
+            <p style="color: #667eea; font-weight: 600; margin: 0.5rem 0 0 0;">KSB Marker</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("## ⚡ Status")
         
         # Load components
         llm = load_ollama_client()
         embedder = load_embedder()
         
+        # Status indicators with custom styling
         if llm:
-            st.success("✅ Ollama connected")
+            st.markdown('<div class="status-ok">✓ Ollama Connected</div>', unsafe_allow_html=True)
             st.session_state.ollama_connected = True
         else:
-            st.error("❌ Ollama not connected")
-            st.info("Make sure Ollama is running with: `ollama serve`")
+            st.markdown('<div class="status-error">✗ Ollama Disconnected</div>', unsafe_allow_html=True)
+            st.caption("Run: `ollama serve`")
         
         if embedder:
-            st.success(f"✅ Embedder loaded ({embedder.embedding_dim}d)")
+            st.markdown(f'<div class="status-ok">✓ Embedder Ready ({embedder.embedding_dim}d)</div>', unsafe_allow_html=True)
             st.session_state.embedder_loaded = True
         else:
-            st.error("❌ Embedder failed to load")
+            st.markdown('<div class="status-error">✗ Embedder Error</div>', unsafe_allow_html=True)
         
-        st.divider()
-        
-        # Module Selection
-        st.markdown("## 📚 Module Selection")
+        st.markdown("## 📚 Module")
         
         # Get available modules
         modules = get_available_modules()
@@ -522,7 +814,8 @@ def main():
             options=list(module_options.keys()),
             format_func=lambda x: module_options[x],
             index=list(module_options.keys()).index(st.session_state.selected_module),
-            help="Choose which module's KSB rubric to use for assessment"
+            help="Choose which module's KSB rubric to use for assessment",
+            label_visibility="collapsed"
         )
         
         # Update if module changed
@@ -533,49 +826,49 @@ def main():
             st.session_state.feedback_generated = False
             st.rerun()
         
-        # Show module info
+        # Show module info with custom card
         module_info = modules[selected_module]
-        st.info(f"**{module_info['description']}**\n\n{module_info['ksb_count']} KSBs to assess")
+        st.markdown(f"""
+        <div class="module-card">
+            <div class="module-name">{module_info['ksb_count']} KSBs to assess</div>
+            <div class="module-desc">{module_info['description']}</div>
+        </div>
+        """, unsafe_allow_html=True)
         
         # Load criteria for selected module
         if st.session_state.ksb_criteria is None:
             st.session_state.ksb_criteria = get_module_criteria(selected_module)
         
         if st.session_state.ksb_criteria:
-            st.success(f"✅ {len(st.session_state.ksb_criteria)} KSBs loaded")
-            
-            # Show KSB list grouped by category
-            with st.expander("View KSB List"):
+            # Show KSB list grouped by category with better styling
+            with st.expander(f"📋 View {len(st.session_state.ksb_criteria)} KSBs", expanded=False):
                 knowledge = [k for k in st.session_state.ksb_criteria if k.code.startswith('K')]
                 skills = [k for k in st.session_state.ksb_criteria if k.code.startswith('S')]
                 behaviours = [k for k in st.session_state.ksb_criteria if k.code.startswith('B')]
                 
                 if knowledge:
-                    st.markdown("**Knowledge:**")
+                    st.markdown('<p class="ksb-category">📘 Knowledge</p>', unsafe_allow_html=True)
                     for ksb in knowledge:
-                        st.markdown(f"- {ksb.code}: {ksb.title[:35]}...")
+                        st.markdown(f'<div class="ksb-item"><b>{ksb.code}</b>: {ksb.title[:30]}...</div>', unsafe_allow_html=True)
                 
                 if skills:
-                    st.markdown("**Skills:**")
+                    st.markdown('<p class="ksb-category">🔧 Skills</p>', unsafe_allow_html=True)
                     for ksb in skills:
-                        st.markdown(f"- {ksb.code}: {ksb.title[:35]}...")
+                        st.markdown(f'<div class="ksb-item"><b>{ksb.code}</b>: {ksb.title[:30]}...</div>', unsafe_allow_html=True)
                 
                 if behaviours:
-                    st.markdown("**Behaviours:**")
+                    st.markdown('<p class="ksb-category">💡 Behaviours</p>', unsafe_allow_html=True)
                     for ksb in behaviours:
-                        st.markdown(f"- {ksb.code}: {ksb.title[:35]}...")
+                        st.markdown(f'<div class="ksb-item"><b>{ksb.code}</b>: {ksb.title[:30]}...</div>', unsafe_allow_html=True)
         
-        st.divider()
-        
-        # Instructions
         st.markdown("## 📖 How to Use")
         st.markdown("""
-        1. **Select module** (MLCC or AIDI)
-        2. Upload the student's report (DOCX/PDF)
-        3. Click "Generate KSB Assessment"
-        4. Review grades and feedback for each KSB
-        5. Download the complete assessment
-        """)
+        <div class="how-to-item">1️⃣ Select module (DSP, MLCC, AIDI)</div>
+        <div class="how-to-item">2️⃣ Upload student report (DOCX/PDF)</div>
+        <div class="how-to-item">3️⃣ Click Generate Assessment</div>
+        <div class="how-to-item">4️⃣ Review KSB grades & feedback</div>
+        <div class="how-to-item">5️⃣ Download the report</div>
+        """, unsafe_allow_html=True)
         
         st.divider()
         
@@ -585,13 +878,23 @@ def main():
                 st.session_state[key] = None if key != 'feedback_generated' else False
             st.rerun()
     
-    # Main content
-    st.markdown("## 📄 Student Report")
+    # Main content area
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); 
+                border-radius: 16px; 
+                padding: 2rem; 
+                margin: 1rem 0;
+                border: 1px solid #2d3748;">
+        <h2 style="color: #e2e8f0; margin-bottom: 0.5rem;">📄 Student Report</h2>
+        <p style="color: #8b95a5; font-size: 0.9rem;">Upload the coursework document to begin assessment</p>
+    </div>
+    """, unsafe_allow_html=True)
     
     uploaded_file = st.file_uploader(
         "Upload the student's coursework report",
         type=['docx', 'pdf'],
-        help="Upload the student's submission in DOCX or PDF format"
+        help="Upload the student's submission in DOCX or PDF format",
+        label_visibility="collapsed"
     )
     
     if uploaded_file:
@@ -607,15 +910,43 @@ def main():
                     st.session_state.feedback_generated = False
                     st.session_state.feedback_results = None
         
-        # Show report info
+        # Show report info with custom cards
         if st.session_state.report_data:
             report = st.session_state.report_data
+            
+            st.markdown("""
+            <div style="margin: 1.5rem 0;">
+                <p style="color: #667eea; font-weight: 600; margin-bottom: 1rem;">📁 Document Loaded</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
             col1, col2, col3 = st.columns(3)
-            col1.metric("Document", report['title'][:30] + "...")
-            col2.metric("Pages (est.)", report['total_pages'])
-            col3.metric("Chunks", len(report['chunks']))
+            
+            with col1:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">Document</div>
+                    <div class="metric-value" style="font-size: 1rem; color: #e2e8f0;">{report['title'][:25]}...</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">Pages (est.)</div>
+                    <div class="metric-value">{report['total_pages']}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col3:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">Text Chunks</div>
+                    <div class="metric-value">{len(report['chunks'])}</div>
+                </div>
+                """, unsafe_allow_html=True)
     
-    st.divider()
+    st.markdown("<br>", unsafe_allow_html=True)
     
     # Generate button
     can_generate = (
@@ -626,7 +957,11 @@ def main():
     )
     
     if not can_generate:
-        st.warning("Upload a report and ensure Ollama is connected to generate assessment.")
+        st.markdown("""
+        <div style="background: #2d3748; padding: 1rem; border-radius: 10px; text-align: center;">
+            <p style="color: #a0aec0; margin: 0;">⚠️ Upload a report and ensure Ollama is connected to generate assessment.</p>
+        </div>
+        """, unsafe_allow_html=True)
     
     if st.button(
         "🚀 Generate KSB Assessment",
