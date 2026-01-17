@@ -1,0 +1,32 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.Python
+env/
+venv/
+coursework-env/
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Data/temp files
+*.docx
+*.pdf
+chroma_db/
+*.log
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Test outputs
+*.md
+!README.md
+
+# Temp
+tmp/
+temp/
