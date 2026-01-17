@@ -7,6 +7,7 @@ from .ksb_parser import (
     get_default_ksb_criteria,
     get_module_criteria,
     get_available_modules,
+    get_dsp_criteria,
     get_mlcc_criteria,
     get_aidi_criteria,
     AVAILABLE_MODULES
@@ -18,6 +19,7 @@ __all__ = [
     'get_default_ksb_criteria',
     'get_module_criteria',
     'get_available_modules',
+    'get_dsp_criteria',
     'get_mlcc_criteria',
     'get_aidi_criteria',
     'AVAILABLE_MODULES'

@@ -9,7 +9,7 @@ Parses markdown tables or text with KSB criteria including:
 """
 import re
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass, field                                                             #"field" is not accessed
+from dataclasses import dataclass, field
 import logging
 
 logger = logging.getLogger(__name__)
@@ -300,8 +300,8 @@ DEFAULT_AIDI_RUBRIC = """
 """
 
 
-# DPS Module - Data Science Principles
-DEFAULT_DPS_RUBRIC = """
+# DSP Module - Data Science Principles
+DEFAULT_DSP_RUBRIC = """
 | KSB | Criteria to PASS | Criteria to MERIT | Criteria for REFERRAL |
 | --- | --- | --- | --- |
 | **K2 – Modern storage/processing/ML methods to maximise organisational impact** | Describes an infrastructure approach and explains, at a basic level, how storage/processing enables analysis and value. Mentions how the organisation would benefit. | Clear trade-offs (cost, scale, governance, latency), realistic technology choices, and strong linkage from infrastructure → insights → business impact. Mentions future ML enablement sensibly. | Infrastructure and impact link is unclear or incorrect; no credible justification of technologies or benefits. |
@@ -331,29 +331,29 @@ DEFAULT_DPS_RUBRIC = """
 # =============================================================================
 
 AVAILABLE_MODULES = {
+    'DSP': {
+        'name': 'DSP - Data Science Principles',
+        'description': 'Data Science fundamentals: EDA, hypothesis testing, visualisation, and statistical reasoning',
+        'rubric': DEFAULT_DSP_RUBRIC,
+        'ksb_count': 19,
+        'ksbs': ['K2', 'K5', 'K15', 'K20', 'K22', 'K24', 'K26', 'K27',
+                 'S1', 'S9', 'S10', 'S13', 'S17', 'S18', 'S21', 'S22', 'S26',
+                 'B3', 'B7']
+    },
     'MLCC': {
-        'name': 'MLCC - Machine Learning with Cloud Computing',
-        'description': 'Module 3: End-to-end ML system on public cloud with performance benchmarking',
+        'name': 'MLCC - Machine Learning on Cloud Computing',
+        'description': 'End-to-end ML system on public cloud with performance benchmarking',
         'rubric': DEFAULT_MLCC_RUBRIC,
         'ksb_count': 11,
         'ksbs': ['K1', 'K2', 'K16', 'K18', 'K19', 'K25', 'S15', 'S16', 'S19', 'S23', 'B5']
     },
     'AIDI': {
-        'name': 'AIDI - AI-Driven Innovation',
+        'name': 'AIDI - AI & Digital Innovation',
         'description': 'AI/Data Products module focusing on business value, ethics, and stakeholder management',
         'rubric': DEFAULT_AIDI_RUBRIC,
         'ksb_count': 19,
         'ksbs': ['K1', 'K4', 'K5', 'K6', 'K8', 'K9', 'K11', 'K12', 'K21', 'K24', 'K29', 
                  'S3', 'S5', 'S6', 'S25', 'S26', 'B3', 'B4', 'B8']
-    },
-    'DPS': {
-        'name': 'DPS - Data Science Principles',
-        'description': 'Data Science fundamentals: EDA, hypothesis testing, visualisation, and statistical reasoning',
-        'rubric': DEFAULT_DPS_RUBRIC,
-        'ksb_count': 19,
-        'ksbs': ['K2', 'K5', 'K15', 'K20', 'K22', 'K24', 'K26', 'K27',
-                 'S1', 'S9', 'S10', 'S13', 'S17', 'S18', 'S21', 'S22', 'S26',
-                 'B3', 'B7']
     }
 }
 
@@ -363,7 +363,7 @@ def get_module_criteria(module_code: str) -> List[KSBCriterion]:
     Get KSB criteria for a specific module.
     
     Args:
-        module_code: 'MLCC' or 'AIDI'
+        module_code: 'DSP', 'MLCC', or 'AIDI'
         
     Returns:
         List of KSBCriterion for the module
@@ -379,6 +379,11 @@ def get_module_criteria(module_code: str) -> List[KSBCriterion]:
 def get_available_modules() -> dict:
     """Get dictionary of available modules and their metadata."""
     return AVAILABLE_MODULES
+
+
+def get_dsp_criteria() -> List[KSBCriterion]:
+    """Get KSB criteria for DSP module."""
+    return get_module_criteria('DSP')
 
 
 def get_mlcc_criteria() -> List[KSBCriterion]:

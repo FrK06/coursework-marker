@@ -21,7 +21,7 @@ from src.vector_store import ChromaStore
 from src.retrieval import Retriever
 from src.llm import OllamaClient
 from src.criteria.ksb_parser import (
-    KSBRubricParser,                                                                                      # "KSBRubricParser" is not accessed
+    KSBRubricParser, 
     KSBCriterion, 
     get_module_criteria,
     get_available_modules,
@@ -104,7 +104,7 @@ def init_session_state():
         'feedback_generated': False,
         'ollama_connected': False,
         'embedder_loaded': False,
-        'selected_module': 'MLCC',  # Default module
+        'selected_module': 'DSP',  # Default module
     }
     for key, value in defaults.items():
         if key not in st.session_state:
