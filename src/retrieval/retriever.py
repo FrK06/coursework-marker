@@ -1,12 +1,15 @@
 """
 Retriever - Advanced retrieval with hybrid search and query expansion.
 
+FIXED VERSION - Corrected similarity threshold handling for hybrid search
+
 Improvements:
 1. Hybrid search combining BM25 (keyword) and semantic similarity
 2. Multi-query expansion for better recall
 3. Reciprocal Rank Fusion (RRF) for result combination
 4. Contextual reranking based on section relevance
 5. Configurable search strategies
+6. FIXED: Appropriate thresholds for hybrid vs semantic search modes
 """
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
@@ -324,7 +327,8 @@ class Retriever:
         similarity_threshold: float = 0.2,
         use_hybrid: bool = True,
         semantic_weight: float = 0.6,
-        keyword_weight: float = 0.4
+        keyword_weight: float = 0.4,
+        hybrid_threshold: float = 0.01  # ADDED: Separate threshold for hybrid search
     ):
         """
         Initialize the retriever.
@@ -335,10 +339,11 @@ class Retriever:
             criteria_top_k: Number of criteria chunks to retrieve
             report_top_k: Number of report chunks per criterion
             max_context_tokens: Maximum tokens per criterion context
-            similarity_threshold: Minimum similarity for inclusion
+            similarity_threshold: Minimum similarity for semantic search (cosine: 0-1)
             use_hybrid: Whether to use hybrid search
             semantic_weight: Weight for semantic search in hybrid
             keyword_weight: Weight for keyword search in hybrid
+            hybrid_threshold: Minimum RRF score for hybrid search (default 0.01)
         """
         self.embedder = embedder
         self.vector_store = vector_store
@@ -346,6 +351,7 @@ class Retriever:
         self.report_top_k = report_top_k
         self.max_context_tokens = max_context_tokens
         self.similarity_threshold = similarity_threshold
+        self.hybrid_threshold = hybrid_threshold  # ADDED
         self.use_hybrid = use_hybrid
         self.semantic_weight = semantic_weight
         self.keyword_weight = keyword_weight
@@ -585,13 +591,22 @@ class Retriever:
             reverse=True
         )
         
+        # ========================================================================
+        # FIXED: Use appropriate threshold based on search mode
+        # ========================================================================
+        # Hybrid search uses RRF scores (typically 0.01-0.15 range)
+        # Semantic search uses cosine similarity (0-1 range)
+        # Using semantic threshold for hybrid scores filters out ALL results!
+        effective_threshold = self.hybrid_threshold if self.use_hybrid else self.similarity_threshold
+        # ========================================================================
+        
         # Filter by threshold and token budget
         selected_chunks = []
         total_tokens = 0
         has_figure_evidence = False
         
         for result in sorted_results:
-            if result.get('similarity', 0) < self.similarity_threshold:
+            if result.get('similarity', 0) < effective_threshold:
                 continue
             
             chunk_tokens = result['metadata'].get('token_count', 100)
