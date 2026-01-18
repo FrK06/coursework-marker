@@ -1,6 +1,12 @@
 """
-Chunking Module - Smart document chunking with structure preservation.
-"""
-from .chunker import SmartChunker
+Chunking Module - Smart document chunking with semantic boundaries.
 
-__all__ = ["SmartChunker"]
+Features:
+- Semantic boundary detection
+- Sliding window with smart overlap
+- Keyword extraction for hybrid search
+- Section-aware chunking
+"""
+from .chunker import SmartChunker, TextChunk
+
+__all__ = ["SmartChunker", "TextChunk"]
