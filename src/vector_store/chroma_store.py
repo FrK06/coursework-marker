@@ -1,11 +1,12 @@
 """
-ChromaDB Vector Store - Persistent vector storage with metadata filtering.
+ChromaDB Vector Store - Enhanced with keyword storage for hybrid search.
 
-Features:
-- Separate collections for criteria and report
-- Metadata-based filtering (section, page, criterion_id)
-- Persistent storage across sessions
-- Efficient similarity search
+Improvements:
+1. Keyword metadata storage for BM25 integration
+2. Better metadata filtering capabilities
+3. Batch operations for efficiency
+4. Section-aware retrieval support
+5. Improved error handling
 """
 from typing import List, Dict, Any, Optional
 from pathlib import Path
@@ -24,16 +25,14 @@ logger = logging.getLogger(__name__)
 
 class ChromaStore:
     """
-    ChromaDB-based vector store for document chunks.
+    Enhanced ChromaDB-based vector store.
     
-    Maintains separate collections for:
-    - Criteria/rubric documents
-    - Student reports
-    
-    Supports:
-    - Metadata filtering (by section, page, criterion)
-    - Similarity threshold filtering
-    - Persistent storage
+    Features:
+    - Separate collections for criteria and reports
+    - Keyword metadata for hybrid search
+    - Section-aware filtering
+    - Batch operations
+    - Robust error handling
     """
     
     def __init__(
@@ -96,17 +95,44 @@ class ChromaStore:
             )
         return self._report_collection
     
+    def _prepare_metadata(self, chunk: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Prepare metadata for ChromaDB storage.
+        
+        ChromaDB requires flat dict with simple types (str, int, float, bool).
+        """
+        metadata = {
+            'document_type': str(chunk.get('document_type', '')),
+            'page_start': int(chunk.get('page_start', 1)),
+            'page_end': int(chunk.get('page_end', 1)),
+            'section_title': str(chunk.get('section_title', ''))[:500],  # Limit length
+            'section_number': str(chunk.get('section_number', '')),
+            'chunk_type': str(chunk.get('chunk_type', 'text')),
+            'has_figure_reference': bool(chunk.get('has_figure_reference', False)),
+            'criterion_id': str(chunk.get('criterion_id', '')),
+            'rubric_level': str(chunk.get('rubric_level', '')),
+            'token_count': int(chunk.get('token_count', 0)),
+            # NEW: keyword storage for hybrid search
+            'keywords': str(chunk.get('keywords', ''))[:1000],  # Comma-separated
+            'parent_section': str(chunk.get('parent_section', ''))[:200],
+            'chunk_index': int(chunk.get('chunk_index', 0)),
+        }
+        
+        return metadata
+    
     def add_criteria(
         self,
         chunks: List[Dict[str, Any]],
-        embeddings: np.ndarray
+        embeddings: np.ndarray,
+        batch_size: int = 100
     ) -> int:
         """
         Add criteria chunks to the store.
         
         Args:
-            chunks: List of chunk dicts with 'content', 'chunk_id', metadata
+            chunks: List of chunk dicts
             embeddings: numpy array of embeddings
+            batch_size: Size of batches for insertion
             
         Returns:
             Number of chunks added
@@ -114,20 +140,23 @@ class ChromaStore:
         return self._add_to_collection(
             self.criteria_collection,
             chunks,
-            embeddings
+            embeddings,
+            batch_size
         )
     
     def add_report(
         self,
         chunks: List[Dict[str, Any]],
-        embeddings: np.ndarray
+        embeddings: np.ndarray,
+        batch_size: int = 100
     ) -> int:
         """
         Add report chunks to the store.
         
         Args:
-            chunks: List of chunk dicts with 'content', 'chunk_id', metadata
+            chunks: List of chunk dicts
             embeddings: numpy array of embeddings
+            batch_size: Size of batches for insertion
             
         Returns:
             Number of chunks added
@@ -135,56 +164,68 @@ class ChromaStore:
         return self._add_to_collection(
             self.report_collection,
             chunks,
-            embeddings
+            embeddings,
+            batch_size
         )
     
     def _add_to_collection(
         self,
         collection,
         chunks: List[Dict[str, Any]],
-        embeddings: np.ndarray
+        embeddings: np.ndarray,
+        batch_size: int = 100
     ) -> int:
-        """Add chunks to a collection."""
+        """Add chunks to a collection in batches."""
         if not chunks:
             return 0
         
-        # Prepare data for ChromaDB
-        ids = []
-        documents = []
-        metadatas = []
+        total_added = 0
         
-        for chunk in chunks:
-            chunk_id = chunk.get('chunk_id', str(hash(chunk.get('content', ''))))
-            ids.append(chunk_id)
-            documents.append(chunk.get('content', ''))
+        # Process in batches
+        for i in range(0, len(chunks), batch_size):
+            batch_chunks = chunks[i:i + batch_size]
+            batch_embeddings = embeddings[i:i + batch_size]
             
-            # Build metadata (ChromaDB requires flat dict with simple types)
-            metadata = {
-                'document_type': str(chunk.get('document_type', '')),
-                'page_start': int(chunk.get('page_start', 1)),
-                'page_end': int(chunk.get('page_end', 1)),
-                'section_title': str(chunk.get('section_title', '')),
-                'chunk_type': str(chunk.get('chunk_type', 'text')),
-                'has_figure_reference': bool(chunk.get('has_figure_reference', False)),
-                'criterion_id': str(chunk.get('criterion_id', '')),
-                'rubric_level': str(chunk.get('rubric_level', '')),
-                'token_count': int(chunk.get('token_count', 0))
-            }
-            metadatas.append(metadata)
+            ids = []
+            documents = []
+            metadatas = []
+            
+            for chunk in batch_chunks:
+                chunk_id = chunk.get('chunk_id', str(hash(chunk.get('content', ''))))
+                ids.append(chunk_id)
+                documents.append(chunk.get('content', ''))
+                metadatas.append(self._prepare_metadata(chunk))
+            
+            # Convert embeddings to list
+            embeddings_list = batch_embeddings.tolist()
+            
+            try:
+                collection.add(
+                    ids=ids,
+                    documents=documents,
+                    metadatas=metadatas,
+                    embeddings=embeddings_list
+                )
+                total_added += len(batch_chunks)
+            except Exception as e:
+                logger.error(f"Error adding batch to collection: {e}")
+                # Try adding one by one to identify problematic chunks
+                for j, (id_, doc, meta, emb) in enumerate(
+                    zip(ids, documents, metadatas, embeddings_list)
+                ):
+                    try:
+                        collection.add(
+                            ids=[id_],
+                            documents=[doc],
+                            metadatas=[meta],
+                            embeddings=[emb]
+                        )
+                        total_added += 1
+                    except Exception as e2:
+                        logger.error(f"Error adding chunk {id_}: {e2}")
         
-        # Convert embeddings to list
-        embeddings_list = embeddings.tolist()
-        
-        # Add to collection
-        collection.add(
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas,
-            embeddings=embeddings_list
-        )
-        
-        logger.info(f"Added {len(chunks)} chunks to {collection.name}")
-        return len(chunks)
+        logger.info(f"Added {total_added} chunks to {collection.name}")
+        return total_added
     
     def query_criteria(
         self,
@@ -192,17 +233,7 @@ class ChromaStore:
         n_results: int = 5,
         filter_criterion: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """
-        Query the criteria collection.
-        
-        Args:
-            query_embedding: Query embedding vector
-            n_results: Number of results to return
-            filter_criterion: Optional criterion ID to filter by
-            
-        Returns:
-            List of matching chunks with scores
-        """
+        """Query the criteria collection."""
         where_filter = None
         if filter_criterion:
             where_filter = {"criterion_id": filter_criterion}
@@ -219,29 +250,40 @@ class ChromaStore:
         query_embedding: np.ndarray,
         n_results: int = 5,
         filter_section: Optional[str] = None,
-        filter_has_figures: Optional[bool] = None
+        filter_has_figures: Optional[bool] = None,
+        filter_page_range: Optional[tuple] = None
     ) -> List[Dict[str, Any]]:
         """
-        Query the report collection.
+        Query the report collection with optional filters.
         
         Args:
             query_embedding: Query embedding vector
             n_results: Number of results to return
-            filter_section: Optional section title to filter by
-            filter_has_figures: Optional filter for chunks with figure references
+            filter_section: Optional section title filter
+            filter_has_figures: Optional filter for chunks with figures
+            filter_page_range: Optional (start_page, end_page) tuple
             
         Returns:
             List of matching chunks with scores
         """
-        where_filter = {}
+        where_clauses = []
         
         if filter_section:
-            where_filter["section_title"] = filter_section
+            where_clauses.append({"section_title": {"$eq": filter_section}})
         
         if filter_has_figures is not None:
-            where_filter["has_figure_reference"] = filter_has_figures
+            where_clauses.append({"has_figure_reference": {"$eq": filter_has_figures}})
         
-        where_filter = where_filter if where_filter else None
+        if filter_page_range:
+            start_page, end_page = filter_page_range
+            where_clauses.append({"page_start": {"$gte": start_page}})
+            where_clauses.append({"page_end": {"$lte": end_page}})
+        
+        where_filter = None
+        if len(where_clauses) == 1:
+            where_filter = where_clauses[0]
+        elif len(where_clauses) > 1:
+            where_filter = {"$and": where_clauses}
         
         return self._query_collection(
             self.report_collection,
@@ -250,6 +292,33 @@ class ChromaStore:
             where_filter
         )
     
+    def query_by_keywords(
+        self,
+        keywords: List[str],
+        collection_name: str = "report",
+        n_results: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Query collection by keywords in metadata.
+        
+        This is a fallback for when keyword search via BM25 isn't available.
+        """
+        collection = (
+            self.report_collection 
+            if collection_name == "report" 
+            else self.criteria_collection
+        )
+        
+        # ChromaDB doesn't support full-text search on metadata,
+        # so we use document content search
+        results = collection.query(
+            query_texts=[' '.join(keywords)],
+            n_results=n_results,
+            include=["documents", "metadatas", "distances"]
+        )
+        
+        return self._format_results(results)
+    
     def _query_collection(
         self,
         collection,
@@ -257,56 +326,117 @@ class ChromaStore:
         n_results: int,
         where_filter: Optional[Dict] = None
     ) -> List[Dict[str, Any]]:
-        """Query a collection and return results."""
-        # Ensure embedding is a list
+        """Query a collection and return formatted results."""
         if isinstance(query_embedding, np.ndarray):
             query_embedding = query_embedding.tolist()
         
-        # Query
-        results = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=n_results,
-            where=where_filter,
-            include=["documents", "metadatas", "distances"]
-        )
-        
-        # Format results
+        try:
+            results = collection.query(
+                query_embeddings=[query_embedding],
+                n_results=n_results,
+                where=where_filter,
+                include=["documents", "metadatas", "distances"]
+            )
+            return self._format_results(results)
+        except Exception as e:
+            logger.error(f"Error querying collection: {e}")
+            return []
+    
+    def _format_results(self, results: Dict) -> List[Dict[str, Any]]:
+        """Format ChromaDB results into a standard format."""
         formatted = []
         
         if results['ids'] and results['ids'][0]:
             for i in range(len(results['ids'][0])):
+                distance = results['distances'][0][i] if results.get('distances') else 0
+                
                 formatted.append({
                     'chunk_id': results['ids'][0][i],
                     'content': results['documents'][0][i],
-                    'metadata': results['metadatas'][0][i],
-                    'distance': results['distances'][0][i],
-                    # Convert distance to similarity (ChromaDB uses L2 by default)
-                    'similarity': 1 / (1 + results['distances'][0][i])
+                    'metadata': results['metadatas'][0][i] if results.get('metadatas') else {},
+                    'distance': distance,
+                    'similarity': 1 / (1 + distance)  # Convert L2 distance to similarity
                 })
         
         return formatted
     
     def get_all_criteria(self) -> List[Dict[str, Any]]:
-        """Get all criteria chunks (for overview)."""
-        result = self.criteria_collection.get(
-            include=["documents", "metadatas"]
+        """Get all criteria chunks."""
+        try:
+            result = self.criteria_collection.get(
+                include=["documents", "metadatas"]
+            )
+            
+            chunks = []
+            if result['ids']:
+                for i in range(len(result['ids'])):
+                    chunks.append({
+                        'chunk_id': result['ids'][i],
+                        'content': result['documents'][i],
+                        'metadata': result['metadatas'][i] if result.get('metadatas') else {}
+                    })
+            
+            return chunks
+        except Exception as e:
+            logger.error(f"Error getting criteria: {e}")
+            return []
+    
+    def get_all_report_chunks(self) -> List[Dict[str, Any]]:
+        """Get all report chunks (for BM25 indexing)."""
+        try:
+            result = self.report_collection.get(
+                include=["documents", "metadatas"]
+            )
+            
+            chunks = []
+            if result['ids']:
+                for i in range(len(result['ids'])):
+                    chunks.append({
+                        'chunk_id': result['ids'][i],
+                        'content': result['documents'][i],
+                        'metadata': result['metadatas'][i] if result.get('metadatas') else {}
+                    })
+            
+            return chunks
+        except Exception as e:
+            logger.error(f"Error getting report chunks: {e}")
+            return []
+    
+    def get_chunks_by_section(
+        self,
+        section_title: str,
+        collection_name: str = "report"
+    ) -> List[Dict[str, Any]]:
+        """Get all chunks from a specific section."""
+        collection = (
+            self.report_collection 
+            if collection_name == "report" 
+            else self.criteria_collection
         )
         
-        chunks = []
-        if result['ids']:
-            for i in range(len(result['ids'])):
-                chunks.append({
-                    'chunk_id': result['ids'][i],
-                    'content': result['documents'][i],
-                    'metadata': result['metadatas'][i]
-                })
-        
-        return chunks
+        try:
+            result = collection.get(
+                where={"section_title": {"$eq": section_title}},
+                include=["documents", "metadatas"]
+            )
+            
+            chunks = []
+            if result['ids']:
+                for i in range(len(result['ids'])):
+                    chunks.append({
+                        'chunk_id': result['ids'][i],
+                        'content': result['documents'][i],
+                        'metadata': result['metadatas'][i] if result.get('metadatas') else {}
+                    })
+            
+            return chunks
+        except Exception as e:
+            logger.error(f"Error getting chunks by section: {e}")
+            return []
     
     def clear_criteria(self):
         """Clear all criteria data."""
         try:
-            # Check if collection exists before deleting
             existing = [c.name for c in self.client.list_collections()]
             if self.criteria_collection_name in existing:
                 self.client.delete_collection(self.criteria_collection_name)
@@ -319,7 +449,6 @@ class ChromaStore:
     def clear_report(self):
         """Clear all report data."""
         try:
-            # Check if collection exists before deleting
             existing = [c.name for c in self.client.list_collections()]
             if self.report_collection_name in existing:
                 self.client.delete_collection(self.report_collection_name)
@@ -336,8 +465,42 @@ class ChromaStore:
     
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about stored data."""
+        try:
+            criteria_count = self.criteria_collection.count()
+            report_count = self.report_collection.count()
+        except Exception:
+            criteria_count = 0
+            report_count = 0
+        
         return {
-            'criteria_count': self.criteria_collection.count(),
-            'report_count': self.report_collection.count(),
-            'persist_directory': str(self.persist_directory)
+            'criteria_count': criteria_count,
+            'report_count': report_count,
+            'persist_directory': str(self.persist_directory),
+            'collections': [c.name for c in self.client.list_collections()]
         }
+    
+    def get_collection_metadata(self, collection_name: str = "report") -> Dict[str, Any]:
+        """Get metadata about a collection."""
+        collection = (
+            self.report_collection 
+            if collection_name == "report" 
+            else self.criteria_collection
+        )
+        
+        try:
+            count = collection.count()
+            
+            # Get sample to understand structure
+            sample = collection.peek(limit=1)
+            
+            return {
+                'name': collection.name,
+                'count': count,
+                'sample_metadata_keys': (
+                    list(sample['metadatas'][0].keys()) 
+                    if sample.get('metadatas') and sample['metadatas'] 
+                    else []
+                )
+            }
+        except Exception as e:
+            return {'error': str(e)}

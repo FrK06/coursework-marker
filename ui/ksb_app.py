@@ -2,6 +2,7 @@
 KSB Coursework Marker - Streamlit UI
 
 Evaluates student coursework against KSB criteria with Pass/Merit/Referral grading.
+Now with configurable hybrid search settings.
 """
 import streamlit as st
 import tempfile
@@ -31,7 +32,7 @@ from src.prompts.ksb_templates import KSBPromptTemplates
 from config import (
     OLLAMA_BASE_URL, OLLAMA_MODEL, 
     EMBEDDING_MODEL,
-    RetrievalConfig, LLMConfig
+    RetrievalConfig, LLMConfig, SearchPresets
 )
 
 # Configure logging
@@ -215,6 +216,24 @@ st.markdown("""
         margin: 0.4rem 0;
     }
     
+    /* Search settings card */
+    .search-settings-card {
+        background: linear-gradient(135deg, #1a1f2e 0%, #1e2530 100%);
+        border: 1px solid #3d4756;
+        border-radius: 10px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+    }
+    
+    .search-preset-badge {
+        background: #667eea;
+        color: white;
+        padding: 0.2rem 0.6rem;
+        border-radius: 12px;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+    
     /* File uploader */
     .stFileUploader {
         background: #1e2530;
@@ -309,6 +328,11 @@ st.markdown("""
         padding: 0.4rem 0;
         line-height: 1.5;
     }
+    
+    /* Slider styling */
+    .stSlider > div > div > div {
+        background: #667eea;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -322,11 +346,37 @@ def init_session_state():
         'feedback_generated': False,
         'ollama_connected': False,
         'embedder_loaded': False,
-        'selected_module': 'DSP',  # Default module
+        'selected_module': 'DSP',
+        # Search settings
+        'search_preset': 'BALANCED',
+        'use_hybrid': True,
+        'semantic_weight': 0.6,
+        'keyword_weight': 0.4,
+        'similarity_threshold': 0.2,
+        'report_top_k': 8,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+
+def apply_search_preset(preset_name: str):
+    """Apply a search preset configuration."""
+    presets = {
+        'BALANCED': {'use_hybrid': True, 'semantic_weight': 0.6, 'keyword_weight': 0.4, 'similarity_threshold': 0.2, 'report_top_k': 8},
+        'SEMANTIC_HEAVY': {'use_hybrid': True, 'semantic_weight': 0.8, 'keyword_weight': 0.2, 'similarity_threshold': 0.25, 'report_top_k': 6},
+        'KEYWORD_HEAVY': {'use_hybrid': True, 'semantic_weight': 0.4, 'keyword_weight': 0.6, 'similarity_threshold': 0.15, 'report_top_k': 10},
+        'SEMANTIC_ONLY': {'use_hybrid': False, 'semantic_weight': 1.0, 'keyword_weight': 0.0, 'similarity_threshold': 0.3, 'report_top_k': 6},
+        'HIGH_RECALL': {'use_hybrid': True, 'semantic_weight': 0.5, 'keyword_weight': 0.5, 'similarity_threshold': 0.1, 'report_top_k': 12},
+    }
+    
+    if preset_name in presets:
+        preset = presets[preset_name]
+        st.session_state.use_hybrid = preset['use_hybrid']
+        st.session_state.semantic_weight = preset['semantic_weight']
+        st.session_state.keyword_weight = preset['keyword_weight']
+        st.session_state.similarity_threshold = preset['similarity_threshold']
+        st.session_state.report_top_k = preset['report_top_k']
 
 
 @st.cache_resource
@@ -360,13 +410,11 @@ def process_report(uploaded_file) -> Optional[Dict[str, Any]]:
         return None
     
     try:
-        # Save to temp file
         suffix = Path(uploaded_file.name).suffix.lower()
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(uploaded_file.getvalue())
             tmp_path = tmp.name
         
-        # Process based on file type
         if suffix == '.docx':
             processor = DocxProcessor()
             doc = processor.process(tmp_path)
@@ -377,17 +425,20 @@ def process_report(uploaded_file) -> Optional[Dict[str, Any]]:
             st.error(f"Unsupported file type: {suffix}")
             return None
         
-        # Chunk the document
         chunker = SmartChunker()
         chunks = chunker.chunk_report(doc.chunks, document_id="report")
+        
+        # Get chunking stats
+        stats = chunker.get_chunking_stats(chunks)
         
         return {
             'chunks': chunks,
             'title': doc.title or uploaded_file.name,
-            'filename': uploaded_file.name,  # Store original filename for comparison
+            'filename': uploaded_file.name,
             'total_pages': doc.total_pages_estimate,
             'figures': getattr(doc, 'figures', {}),
-            'raw_text': doc.raw_text
+            'raw_text': doc.raw_text,
+            'chunking_stats': stats
         }
         
     except Exception as e:
@@ -405,16 +456,13 @@ def index_report(
     progress = st.progress(0, text="Indexing report...")
     
     try:
-        # Clear existing data
         vector_store.clear_report()
         progress.progress(20, text="Embedding report chunks...")
         
-        # Embed report chunks
         report_texts = [c.content for c in report_data['chunks']]
         report_embeddings = embedder.embed_documents(report_texts)
         progress.progress(70, text="Storing in vector database...")
         
-        # Index report
         report_dicts = [c.to_dict() for c in report_data['chunks']]
         vector_store.add_report(report_dicts, report_embeddings)
         progress.progress(100, text="Indexing complete!")
@@ -433,27 +481,28 @@ def evaluate_ksb(
     ksb: KSBCriterion,
     embedder: Embedder,
     vector_store: ChromaStore,
-    llm: OllamaClient
+    llm: OllamaClient,
+    search_settings: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Evaluate student work against a single KSB."""
+    """Evaluate student work against a single KSB with configurable search."""
     
-    # Create retriever
+    # Create retriever with current search settings
     retriever = Retriever(
         embedder=embedder,
         vector_store=vector_store,
-        report_top_k=RetrievalConfig.REPORT_TOP_K,
+        report_top_k=search_settings['report_top_k'],
         max_context_tokens=RetrievalConfig.MAX_CONTEXT_TOKENS,
-        similarity_threshold=RetrievalConfig.SIMILARITY_THRESHOLD
+        similarity_threshold=search_settings['similarity_threshold'],
+        use_hybrid=search_settings['use_hybrid'],
+        semantic_weight=search_settings['semantic_weight'],
+        keyword_weight=search_settings['keyword_weight']
     )
     
-    # Build query from KSB content
     query = f"{ksb.code} {ksb.title} {ksb.pass_criteria}"
     
-    # Retrieve relevant evidence
     result = retriever.retrieve_for_criterion(query, ksb.code)
     evidence_text = retriever.format_context_for_llm(result)
     
-    # Format prompt
     prompt = KSBPromptTemplates.format_ksb_evaluation(
         ksb_code=ksb.code,
         ksb_title=ksb.title,
@@ -463,7 +512,6 @@ def evaluate_ksb(
         evidence_text=evidence_text
     )
     
-    # Generate evaluation
     system_prompt = KSBPromptTemplates.get_system_prompt()
     evaluation = llm.generate(
         prompt=prompt,
@@ -472,7 +520,6 @@ def evaluate_ksb(
         max_tokens=1500
     )
     
-    # Extract recommended grade from evaluation
     grade = extract_grade_from_evaluation(evaluation)
     
     return {
@@ -484,7 +531,9 @@ def evaluate_ksb(
         'referral_criteria': ksb.referral_criteria,
         'evaluation': evaluation,
         'grade': grade,
-        'evidence_count': len(result.retrieved_chunks)
+        'evidence_count': len(result.retrieved_chunks),
+        'search_strategy': result.search_strategy,
+        'query_variations': len(result.query_variations)
     }
 
 
@@ -492,7 +541,6 @@ def extract_grade_from_evaluation(evaluation: str) -> str:
     """Extract the recommended grade from evaluation text."""
     import re
     
-    # Look for "Recommended Grade: PASS/MERIT/REFERRAL"
     match = re.search(
         r'Recommended Grade[:\s]+\*?\*?(PASS|MERIT|REFERRAL)\*?\*?',
         evaluation,
@@ -502,7 +550,6 @@ def extract_grade_from_evaluation(evaluation: str) -> str:
     if match:
         return match.group(1).upper()
     
-    # Fallback: look for grade mentions
     eval_upper = evaluation.upper()
     if 'REFERRAL' in eval_upper and 'NOT MET' in eval_upper:
         return 'REFERRAL'
@@ -518,7 +565,6 @@ def generate_overall_summary(
 ) -> str:
     """Generate overall summary from KSB evaluations."""
     
-    # Compile evaluations text
     evals_text = ""
     for eval_data in ksb_evaluations:
         evals_text += f"\n\n{'='*60}\n"
@@ -526,11 +572,9 @@ def generate_overall_summary(
         evals_text += f"**Recommended Grade: {eval_data['grade']}**\n\n"
         evals_text += eval_data['evaluation']
     
-    # Format prompt
     prompt = KSBPromptTemplates.format_overall_summary(evals_text)
     system_prompt = KSBPromptTemplates.get_system_prompt()
     
-    # Generate summary
     summary = llm.generate(
         prompt=prompt,
         system_prompt=system_prompt,
@@ -545,9 +589,10 @@ def generate_feedback(
     ksb_criteria: List[KSBCriterion],
     embedder: Embedder,
     vector_store: ChromaStore,
-    llm: OllamaClient
+    llm: OllamaClient,
+    search_settings: Dict[str, Any]
 ) -> Optional[Dict[str, Any]]:
-    """Generate feedback for all KSBs."""
+    """Generate feedback for all KSBs with configurable search."""
     
     ksb_evaluations = []
     total_ksbs = len(ksb_criteria)
@@ -559,7 +604,7 @@ def generate_feedback(
         status_text.markdown(f"**Evaluating {ksb.code}:** {ksb.title[:50]}...")
         
         try:
-            eval_result = evaluate_ksb(ksb, embedder, vector_store, llm)
+            eval_result = evaluate_ksb(ksb, embedder, vector_store, llm, search_settings)
             ksb_evaluations.append(eval_result)
         except Exception as e:
             logger.exception(f"Error evaluating {ksb.code}")
@@ -569,13 +614,14 @@ def generate_feedback(
                 'ksb_category': ksb.category,
                 'evaluation': f"Error during evaluation: {str(e)}",
                 'grade': 'ERROR',
-                'evidence_count': 0
+                'evidence_count': 0,
+                'search_strategy': 'N/A',
+                'query_variations': 0
             })
         
         progress_bar.progress((i + 1) / total_ksbs, 
                              text=f"Evaluated {i + 1}/{total_ksbs} KSBs")
     
-    # Generate overall summary
     status_text.markdown("**Generating overall summary...**")
     overall_summary = generate_overall_summary(ksb_evaluations, llm)
     
@@ -584,7 +630,8 @@ def generate_feedback(
     
     return {
         'ksb_evaluations': ksb_evaluations,
-        'overall_summary': overall_summary
+        'overall_summary': overall_summary,
+        'search_settings': search_settings
     }
 
 
@@ -603,7 +650,6 @@ def display_grade_badge(grade: str):
 def display_ksb_summary_table(evaluations: List[Dict[str, Any]]):
     """Display a summary table of all KSB grades."""
     
-    # Summary stats at top
     total = len(evaluations)
     merits = sum(1 for e in evaluations if e['grade'] == 'MERIT')
     passes = sum(1 for e in evaluations if e['grade'] == 'PASS')
@@ -619,7 +665,6 @@ def display_ksb_summary_table(evaluations: List[Dict[str, Any]]):
     </div>
     """, unsafe_allow_html=True)
     
-    # Stats cards
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
@@ -656,7 +701,6 @@ def display_ksb_summary_table(evaluations: List[Dict[str, Any]]):
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Group by category
     knowledge = [e for e in evaluations if e.get('ksb_category') == 'Knowledge']
     skills = [e for e in evaluations if e.get('ksb_category') == 'Skill']
     behaviours = [e for e in evaluations if e.get('ksb_category') == 'Behaviour']
@@ -712,12 +756,25 @@ def display_ksb_summary_table(evaluations: List[Dict[str, Any]]):
 def display_feedback(results: Dict[str, Any]):
     """Display the generated feedback."""
     
-    # Display KSB summary table first
     display_ksb_summary_table(results.get('ksb_evaluations', []))
+    
+    # Display search settings used
+    if 'search_settings' in results:
+        settings = results['search_settings']
+        st.markdown(f"""
+        <div style="background: #1a1f2e; border: 1px solid #3d4756; border-radius: 8px; padding: 0.75rem; margin: 1rem 0;">
+            <span style="color: #8b95a5; font-size: 0.85rem;">
+                🔍 Search: <b style="color: #667eea;">{'Hybrid' if settings['use_hybrid'] else 'Semantic Only'}</b> | 
+                Semantic: <b>{int(settings['semantic_weight']*100)}%</b> | 
+                Keyword: <b>{int(settings['keyword_weight']*100)}%</b> |
+                Threshold: <b>{settings['similarity_threshold']}</b> |
+                Top-K: <b>{settings['report_top_k']}</b>
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Display overall summary
     st.markdown("""
     <div style="background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); 
                 border-radius: 16px; 
@@ -731,7 +788,6 @@ def display_feedback(results: Dict[str, Any]):
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Display per-KSB evaluations
     st.markdown("""
     <div style="background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); 
                 border-radius: 16px; 
@@ -751,11 +807,24 @@ def display_feedback(results: Dict[str, Any]):
             else "🔴"
         )
         
+        evidence_info = f"{eval_data.get('evidence_count', 0)} chunks"
+        if eval_data.get('query_variations'):
+            evidence_info += f", {eval_data['query_variations']} queries"
+        
         with st.expander(
             f"{grade_color} **{eval_data['ksb_code']}** - {eval_data['ksb_title'][:50]}... [{grade}]",
             expanded=False
         ):
-            # Show criteria
+            # Show search info
+            st.markdown(f"""
+            <div style="background: #1a1f2e; padding: 0.5rem; border-radius: 6px; margin-bottom: 1rem;">
+                <span style="color: #8b95a5; font-size: 0.85rem;">
+                    📊 Evidence: <b style="color: #667eea;">{evidence_info}</b> | 
+                    Strategy: <b>{eval_data.get('search_strategy', 'N/A')}</b>
+                </span>
+            </div>
+            """, unsafe_allow_html=True)
+            
             st.markdown("**KSB Criteria:**")
             
             criteria_tabs = st.tabs(["Pass", "Merit", "Referral"])
@@ -767,12 +836,132 @@ def display_feedback(results: Dict[str, Any]):
                 st.error(eval_data.get('referral_criteria', 'N/A'))
             
             st.markdown("---")
-            st.markdown(f"**Evidence chunks found:** {eval_data.get('evidence_count', 0)}")
-            st.markdown("---")
-            
-            # Show evaluation
             st.markdown("**Evaluation:**")
             st.markdown(eval_data.get('evaluation', 'No evaluation available.'))
+
+
+def render_search_settings():
+    """Render the search settings panel in the sidebar."""
+    st.markdown("## 🔍 Search Settings")
+    
+    # Preset selector
+    preset_options = {
+        'BALANCED': '⚖️ Balanced (60/40)',
+        'SEMANTIC_HEAVY': '🧠 Semantic Heavy (80/20)',
+        'KEYWORD_HEAVY': '🔤 Keyword Heavy (40/60)',
+        'SEMANTIC_ONLY': '🎯 Semantic Only',
+        'HIGH_RECALL': '📚 High Recall (50/50)',
+        'CUSTOM': '⚙️ Custom'
+    }
+    
+    selected_preset = st.selectbox(
+        "Search Preset",
+        options=list(preset_options.keys()),
+        format_func=lambda x: preset_options[x],
+        index=list(preset_options.keys()).index(st.session_state.get('search_preset', 'BALANCED')),
+        help="Choose a pre-configured search strategy or customize your own"
+    )
+    
+    # Apply preset if changed (and not custom)
+    if selected_preset != st.session_state.search_preset:
+        st.session_state.search_preset = selected_preset
+        if selected_preset != 'CUSTOM':
+            apply_search_preset(selected_preset)
+            st.rerun()
+    
+    # Show current settings
+    with st.expander("⚙️ Advanced Settings", expanded=(selected_preset == 'CUSTOM')):
+        # Hybrid toggle
+        use_hybrid = st.toggle(
+            "Enable Hybrid Search",
+            value=st.session_state.use_hybrid,
+            help="Combine semantic (meaning) and keyword (BM25) search"
+        )
+        
+        if use_hybrid != st.session_state.use_hybrid:
+            st.session_state.use_hybrid = use_hybrid
+            st.session_state.search_preset = 'CUSTOM'
+        
+        if use_hybrid:
+            # Weight sliders
+            st.markdown("**Search Weights**")
+            
+            semantic_weight = st.slider(
+                "Semantic Weight",
+                min_value=0.0,
+                max_value=1.0,
+                value=st.session_state.semantic_weight,
+                step=0.1,
+                help="Weight for meaning-based similarity search"
+            )
+            
+            if semantic_weight != st.session_state.semantic_weight:
+                st.session_state.semantic_weight = semantic_weight
+                st.session_state.keyword_weight = 1.0 - semantic_weight
+                st.session_state.search_preset = 'CUSTOM'
+            
+            # Show keyword weight (auto-calculated)
+            st.markdown(f"""
+            <div style="background: #1a1f2e; padding: 0.5rem; border-radius: 6px; margin: 0.5rem 0;">
+                <span style="color: #8b95a5; font-size: 0.85rem;">
+                    Keyword Weight: <b style="color: #667eea;">{1.0 - semantic_weight:.1f}</b>
+                </span>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Similarity threshold
+        similarity_threshold = st.slider(
+            "Similarity Threshold",
+            min_value=0.0,
+            max_value=0.5,
+            value=st.session_state.similarity_threshold,
+            step=0.05,
+            help="Minimum similarity score to include a chunk (lower = more results)"
+        )
+        
+        if similarity_threshold != st.session_state.similarity_threshold:
+            st.session_state.similarity_threshold = similarity_threshold
+            st.session_state.search_preset = 'CUSTOM'
+        
+        # Top-K
+        report_top_k = st.slider(
+            "Results per KSB",
+            min_value=3,
+            max_value=15,
+            value=st.session_state.report_top_k,
+            step=1,
+            help="Number of text chunks to retrieve for each KSB"
+        )
+        
+        if report_top_k != st.session_state.report_top_k:
+            st.session_state.report_top_k = report_top_k
+            st.session_state.search_preset = 'CUSTOM'
+    
+    # Show current config summary
+    st.markdown(f"""
+    <div class="search-settings-card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+            <span style="color: #8b95a5; font-size: 0.85rem;">Current Config</span>
+            <span class="search-preset-badge">{st.session_state.search_preset}</span>
+        </div>
+        <div style="color: #c9d1d9; font-size: 0.85rem; line-height: 1.6;">
+            {'🔀 Hybrid' if st.session_state.use_hybrid else '🎯 Semantic'} | 
+            S:{int(st.session_state.semantic_weight*100)}% K:{int(st.session_state.keyword_weight*100)}%<br>
+            Threshold: {st.session_state.similarity_threshold} | Top-K: {st.session_state.report_top_k}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def get_current_search_settings() -> Dict[str, Any]:
+    """Get current search settings from session state."""
+    return {
+        'use_hybrid': st.session_state.use_hybrid,
+        'semantic_weight': st.session_state.semantic_weight,
+        'keyword_weight': st.session_state.keyword_weight,
+        'similarity_threshold': st.session_state.similarity_threshold,
+        'report_top_k': st.session_state.report_top_k
+    }
 
 
 def main():
@@ -783,7 +972,7 @@ def main():
     st.markdown('<p class="main-header">📝 KSB Coursework Marker</p>', 
                 unsafe_allow_html=True)
     st.markdown(
-        '<p class="sub-header">AI-powered KSB assessment with Pass/Merit/Referral grading</p>',
+        '<p class="sub-header">AI-powered KSB assessment with hybrid search</p>',
         unsafe_allow_html=True
     )
     
@@ -803,7 +992,6 @@ def main():
         llm = load_ollama_client()
         embedder = load_embedder()
         
-        # Status indicators with custom styling
         if llm:
             st.markdown('<div class="status-ok">✓ Ollama Connected</div>', unsafe_allow_html=True)
             st.session_state.ollama_connected = True
@@ -819,29 +1007,25 @@ def main():
         
         st.markdown("## 📚 Module")
         
-        # Get available modules
         modules = get_available_modules()
         module_options = {code: info['name'] for code, info in modules.items()}
         
-        # Module selector
         selected_module = st.selectbox(
             "Select Module",
             options=list(module_options.keys()),
             format_func=lambda x: module_options[x],
             index=list(module_options.keys()).index(st.session_state.selected_module),
-            help="Choose which module's KSB rubric to use for assessment",
+            help="Choose which module's KSB rubric to use",
             label_visibility="collapsed"
         )
         
-        # Update if module changed
         if selected_module != st.session_state.selected_module:
             st.session_state.selected_module = selected_module
-            st.session_state.ksb_criteria = None  # Reset criteria
+            st.session_state.ksb_criteria = None
             st.session_state.feedback_results = None
             st.session_state.feedback_generated = False
             st.rerun()
         
-        # Show module info with custom card
         module_info = modules[selected_module]
         st.markdown(f"""
         <div class="module-card">
@@ -850,12 +1034,10 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
-        # Load criteria for selected module
         if st.session_state.ksb_criteria is None:
             st.session_state.ksb_criteria = get_module_criteria(selected_module)
         
         if st.session_state.ksb_criteria:
-            # Show KSB list grouped by category with IMPROVED styling and FULL descriptions
             with st.expander(f"📋 View {len(st.session_state.ksb_criteria)} KSBs", expanded=False):
                 knowledge = [k for k in st.session_state.ksb_criteria if k.code.startswith('K')]
                 skills = [k for k in st.session_state.ksb_criteria if k.code.startswith('S')]
@@ -864,7 +1046,6 @@ def main():
                 if knowledge:
                     st.markdown('<p class="ksb-category">📘 Knowledge</p>', unsafe_allow_html=True)
                     for ksb in knowledge:
-                        # Show more of the title - up to 60 chars or full if shorter
                         title_display = ksb.title if len(ksb.title) <= 60 else ksb.title[:57] + "..."
                         st.markdown(
                             f'<div class="ksb-item"><span class="ksb-code">{ksb.code}</span>: {title_display}</div>', 
@@ -889,18 +1070,20 @@ def main():
                             unsafe_allow_html=True
                         )
         
+        # Search Settings Section
+        render_search_settings()
+        
         st.markdown("## 📖 How to Use")
         st.markdown("""
         <div class="how-to-item">1️⃣ Select module (DSP, MLCC, AIDI)</div>
-        <div class="how-to-item">2️⃣ Upload student report (DOCX/PDF)</div>
-        <div class="how-to-item">3️⃣ Click Generate Assessment</div>
-        <div class="how-to-item">4️⃣ Review KSB grades & feedback</div>
-        <div class="how-to-item">5️⃣ Download the report</div>
+        <div class="how-to-item">2️⃣ Configure search settings</div>
+        <div class="how-to-item">3️⃣ Upload student report (DOCX/PDF)</div>
+        <div class="how-to-item">4️⃣ Click Generate Assessment</div>
+        <div class="how-to-item">5️⃣ Review KSB grades & feedback</div>
         """, unsafe_allow_html=True)
         
         st.divider()
         
-        # Reset button
         if st.button("🔄 Reset All", use_container_width=True):
             for key in ['report_data', 'feedback_results', 'feedback_generated', 'ksb_criteria']:
                 st.session_state[key] = None if key != 'feedback_generated' else False
@@ -926,7 +1109,6 @@ def main():
     )
     
     if uploaded_file:
-        # Process if new file (compare by filename, not document title)
         if (st.session_state.report_data is None or 
             st.session_state.report_data.get('filename') != uploaded_file.name):
             
@@ -938,7 +1120,6 @@ def main():
                     st.session_state.feedback_generated = False
                     st.session_state.feedback_results = None
         
-        # Show report info with custom cards
         if st.session_state.report_data:
             report = st.session_state.report_data
             
@@ -948,20 +1129,20 @@ def main():
             </div>
             """, unsafe_allow_html=True)
             
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             
             with col1:
                 st.markdown(f"""
                 <div class="metric-card">
                     <div class="metric-label">Document</div>
-                    <div class="metric-value" style="font-size: 1rem; color: #e2e8f0;">{report['title'][:25]}...</div>
+                    <div class="metric-value" style="font-size: 0.9rem; color: #e2e8f0;">{report['title'][:20]}...</div>
                 </div>
                 """, unsafe_allow_html=True)
             
             with col2:
                 st.markdown(f"""
                 <div class="metric-card">
-                    <div class="metric-label">Pages (est.)</div>
+                    <div class="metric-label">Pages</div>
                     <div class="metric-value">{report['total_pages']}</div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -969,14 +1150,23 @@ def main():
             with col3:
                 st.markdown(f"""
                 <div class="metric-card">
-                    <div class="metric-label">Text Chunks</div>
+                    <div class="metric-label">Chunks</div>
                     <div class="metric-value">{len(report['chunks'])}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col4:
+                stats = report.get('chunking_stats', {})
+                keywords_count = stats.get('chunks_with_keywords', 0)
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">With Keywords</div>
+                    <div class="metric-value">{keywords_count}</div>
                 </div>
                 """, unsafe_allow_html=True)
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Generate button
     can_generate = (
         st.session_state.report_data is not None and
         st.session_state.ksb_criteria is not None and
@@ -997,11 +1187,12 @@ def main():
         disabled=not can_generate,
         use_container_width=True
     ):
-        # Create temp directory for vector store
+        # Get current search settings
+        search_settings = get_current_search_settings()
+        
         tmpdir = tempfile.mkdtemp()
         vector_store = ChromaStore(persist_directory=tmpdir)
         
-        # Index report
         st.markdown("### 📥 Indexing Report")
         success = index_report(
             st.session_state.report_data,
@@ -1011,16 +1202,22 @@ def main():
         
         if success:
             st.markdown("### 🤖 Evaluating Against KSBs")
+            
+            # Show search config being used
             st.info(
-                f"Evaluating {len(st.session_state.ksb_criteria)} KSBs. "
-                "This may take several minutes on CPU."
+                f"Using **{st.session_state.search_preset}** search: "
+                f"{'Hybrid' if search_settings['use_hybrid'] else 'Semantic'} "
+                f"(S:{int(search_settings['semantic_weight']*100)}% / K:{int(search_settings['keyword_weight']*100)}%) | "
+                f"Threshold: {search_settings['similarity_threshold']} | "
+                f"Top-K: {search_settings['report_top_k']}"
             )
             
             results = generate_feedback(
                 st.session_state.ksb_criteria,
                 embedder,
                 vector_store,
-                llm
+                llm,
+                search_settings
             )
             
             if results:
@@ -1028,41 +1225,47 @@ def main():
                 st.session_state.feedback_generated = True
                 st.rerun()
     
-    # Display results if available
+    # Display results
     if st.session_state.get('feedback_generated') and st.session_state.get('feedback_results'):
         st.divider()
         display_feedback(st.session_state.feedback_results)
         
-        # Download option
         st.divider()
         st.markdown("### 💾 Export Assessment")
         
-        # Get module info
         module_code = st.session_state.selected_module
         module_info = AVAILABLE_MODULES.get(module_code, {})
         module_name = module_info.get('name', module_code)
         
-        # Create downloadable text
+        # Include search settings in export
+        search_settings = st.session_state.feedback_results.get('search_settings', {})
+        
         export_text = f"# KSB Coursework Assessment Report\n\n"
         export_text += f"**Module:** {module_name}\n\n"
         export_text += f"**Date:** {time.strftime('%Y-%m-%d %H:%M')}\n\n"
+        export_text += f"**Search Configuration:**\n"
+        export_text += f"- Mode: {'Hybrid (BM25 + Semantic)' if search_settings.get('use_hybrid', True) else 'Semantic Only'}\n"
+        export_text += f"- Semantic Weight: {search_settings.get('semantic_weight', 0.6)}\n"
+        export_text += f"- Keyword Weight: {search_settings.get('keyword_weight', 0.4)}\n"
+        export_text += f"- Similarity Threshold: {search_settings.get('similarity_threshold', 0.2)}\n"
+        export_text += f"- Results per KSB: {search_settings.get('report_top_k', 8)}\n\n"
         
-        # Add summary table
         export_text += "---\n\n## KSB Grade Summary\n\n"
-        export_text += "| KSB | Title | Grade |\n"
-        export_text += "|-----|-------|-------|\n"
+        export_text += "| KSB | Title | Grade | Evidence |\n"
+        export_text += "|-----|-------|-------|----------|\n"
         for eval_data in st.session_state.feedback_results.get('ksb_evaluations', []):
-            export_text += f"| {eval_data['ksb_code']} | {eval_data['ksb_title'][:40]}... | {eval_data['grade']} |\n"
+            export_text += f"| {eval_data['ksb_code']} | {eval_data['ksb_title'][:35]}... | {eval_data['grade']} | {eval_data.get('evidence_count', 0)} chunks |\n"
         
         export_text += "\n\n## Overall Assessment\n\n"
         export_text += st.session_state.feedback_results.get('overall_summary', '') + "\n\n"
         
         for eval_data in st.session_state.feedback_results.get('ksb_evaluations', []):
             export_text += f"---\n\n## {eval_data['ksb_code']} - {eval_data['ksb_title']}\n\n"
-            export_text += f"**Grade: {eval_data['grade']}**\n\n"
+            export_text += f"**Grade: {eval_data['grade']}** | "
+            export_text += f"Evidence: {eval_data.get('evidence_count', 0)} chunks | "
+            export_text += f"Search: {eval_data.get('search_strategy', 'N/A')}\n\n"
             export_text += eval_data.get('evaluation', '') + "\n\n"
         
-        # Generate filename with module
         filename = f"ksb_assessment_{module_code.lower()}_{time.strftime('%Y%m%d')}.md"
         
         st.download_button(
