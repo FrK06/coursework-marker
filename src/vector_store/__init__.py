@@ -1,11 +1,5 @@
 """
-Vector Store Module - Enhanced ChromaDB storage with keyword support.
-
-Features:
-- Keyword metadata for hybrid search
-- Section-aware filtering
-- Batch operations
-- Improved error handling
+Vector Store Module - ChromaDB storage for embeddings.
 """
 from .chroma_store import ChromaStore
 

@@ -1,9 +1,8 @@
 """
-KSB Coursework Marker - Streamlit UI
-
-DEBUG VERSION - Added logging to identify retrieval failures.
+KSB Coursework Marker - Streamlit UI with Vision Support
 
 Evaluates student coursework against KSB criteria with Pass/Merit/Referral grading.
+Now includes vision analysis for charts, figures, and tables.
 """
 import streamlit as st
 import tempfile
@@ -13,33 +12,21 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 import sys
 
-# Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.document_processing import DocxProcessor, PDFProcessor
+from src.document_processing import DocxProcessor, PDFProcessor, ImageProcessor, ProcessedImage
 from src.chunking import SmartChunker
 from src.embeddings import Embedder
 from src.vector_store import ChromaStore
 from src.retrieval import Retriever
 from src.llm import OllamaClient
-from src.criteria.ksb_parser import (
-    KSBCriterion, 
-    get_module_criteria,
-    get_available_modules,
-    AVAILABLE_MODULES
-)
-from src.prompts.ksb_templates import KSBPromptTemplates
-from config import (
-    OLLAMA_BASE_URL, OLLAMA_MODEL, 
-    EMBEDDING_MODEL,
-    RetrievalConfig, LLMConfig
-)
+from src.criteria import KSBCriterion, get_module_criteria, get_available_modules
+from src.prompts import KSBPromptTemplates, extract_grade_from_evaluation
+from config import OLLAMA_BASE_URL, OLLAMA_MODEL, EMBEDDING_MODEL, RetrievalConfig, LLMConfig
 
-# Configure logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Page config
 st.set_page_config(
     page_title="KSB Coursework Marker",
     page_icon="📝",
@@ -47,28 +34,18 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS (abbreviated for brevity - same as before)
 st.markdown("""
 <style>
     .main-header { font-size: 2.8rem; font-weight: 700; background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.5rem; text-align: center; }
     .sub-header { font-size: 1.1rem; color: #8b95a5; margin-bottom: 2rem; text-align: center; }
-    .metric-card { background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); border: 1px solid #2d3748; border-radius: 12px; padding: 1.2rem; text-align: center; }
-    .metric-value { font-size: 2rem; font-weight: 700; color: #667eea; }
-    .metric-label { font-size: 0.85rem; color: #8b95a5; text-transform: uppercase; }
-    .grade-pass { background: linear-gradient(135deg, #059669 0%, #10b981 100%); color: white; padding: 0.35rem 1rem; border-radius: 20px; font-weight: 600; }
-    .grade-merit { background: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%); color: white; padding: 0.35rem 1rem; border-radius: 20px; font-weight: 600; }
-    .grade-referral { background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%); color: white; padding: 0.35rem 1rem; border-radius: 20px; font-weight: 600; }
     .status-ok { background: linear-gradient(135deg, #059669 0%, #10b981 100%); color: white; padding: 0.6rem 1rem; border-radius: 8px; margin: 0.4rem 0; }
     .status-error { background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%); color: white; padding: 0.6rem 1rem; border-radius: 8px; margin: 0.4rem 0; }
-    .module-card { background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); border: 1px solid #667eea; border-radius: 10px; padding: 1rem; margin: 0.5rem 0; }
-    .ksb-category { color: #667eea; font-weight: 600; font-size: 1rem; margin-top: 1rem; }
-    .ksb-item { color: #c9d1d9; font-size: 0.95rem; padding: 0.5rem 0; border-left: 3px solid #3d4756; padding-left: 0.75rem; margin: 0.4rem 0; }
-    .ksb-code { color: #667eea; font-weight: 700; }
     .stat-card { background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); border-radius: 10px; padding: 1rem; text-align: center; border: 1px solid #2d3748; }
     .stat-number { font-size: 2.5rem; font-weight: 700; }
     .stat-number.merit { color: #3b82f6; }
     .stat-number.pass { color: #10b981; }
     .stat-number.referral { color: #ef4444; }
+    .metric-label { font-size: 0.85rem; color: #8b95a5; text-transform: uppercase; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -77,6 +54,7 @@ def init_session_state():
     """Initialize session state variables."""
     defaults = {
         'report_data': None,
+        'processed_images': None,
         'ksb_criteria': None,
         'feedback_results': None,
         'feedback_generated': False,
@@ -89,6 +67,8 @@ def init_session_state():
         'keyword_weight': 0.4,
         'similarity_threshold': 0.2,
         'report_top_k': 8,
+        'use_vision': True,
+        'max_images_per_ksb': 5,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -118,8 +98,7 @@ def apply_search_preset(preset_name: str):
 def load_ollama_client():
     """Load and cache the Ollama client."""
     try:
-        client = OllamaClient(base_url=OLLAMA_BASE_URL, model=OLLAMA_MODEL, timeout=120)
-        return client
+        return OllamaClient(base_url=OLLAMA_BASE_URL, model=OLLAMA_MODEL, timeout=180)
     except Exception as e:
         logger.error(f"Failed to connect to Ollama: {e}")
         return None
@@ -135,8 +114,18 @@ def load_embedder():
         return None
 
 
-def process_report(uploaded_file) -> Optional[Dict[str, Any]]:
-    """Process uploaded student report."""
+@st.cache_resource
+def load_image_processor():
+    """Load and cache the image processor."""
+    try:
+        return ImageProcessor(max_size=(1024, 1024))
+    except Exception as e:
+        logger.warning(f"Failed to load image processor: {e}")
+        return None
+
+
+def process_report(uploaded_file, image_processor: Optional[ImageProcessor] = None) -> Optional[Dict[str, Any]]:
+    """Process uploaded student report including images."""
     if uploaded_file is None:
         return None
     
@@ -145,8 +134,6 @@ def process_report(uploaded_file) -> Optional[Dict[str, Any]]:
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(uploaded_file.getvalue())
             tmp_path = tmp.name
-        
-        print(f"[DEBUG] Processing report: {uploaded_file.name}")
         
         if suffix == '.docx':
             processor = DocxProcessor()
@@ -158,45 +145,52 @@ def process_report(uploaded_file) -> Optional[Dict[str, Any]]:
         
         doc = processor.process(tmp_path)
         
-        print(f"[DEBUG] Processor returned {len(doc.chunks)} raw chunks")
-        print(f"[DEBUG] Raw text length: {len(doc.raw_text)} chars")
-        
         if len(doc.chunks) == 0:
-            print(f"[DEBUG] WARNING: No chunks from processor!")
             st.error("Document processor returned no content!")
             return None
         
         chunker = SmartChunker()
         chunks = chunker.chunk_report(doc.chunks, document_id="report")
         
-        print(f"[DEBUG] SmartChunker created {len(chunks)} chunks")
-        
         if len(chunks) == 0:
-            print(f"[DEBUG] WARNING: SmartChunker returned no chunks!")
             st.error("Chunker returned no content!")
             return None
         
-        # Show sample
-        print(f"[DEBUG] Sample chunk[0]: {chunks[0].content[:200]}...")
-        
         stats = chunker.get_chunking_stats(chunks)
-        print(f"[DEBUG] Chunking stats: {stats}")
+        
+        # Process images if available
+        processed_images = []
+        if image_processor:
+            if suffix == '.docx' and hasattr(doc, 'figures') and doc.figures:
+                captions = getattr(doc, 'figure_captions', {})
+                processed_images = image_processor.process_docx_images(doc.figures, captions)
+                logger.info(f"Processed {len(processed_images)} images from DOCX")
+            elif suffix == '.pdf':
+                processed_images = image_processor.process_pdf_images(tmp_path)
+                logger.info(f"Processed {len(processed_images)} images from PDF")
+        
+        # Get page count - handle both DOCX (estimate) and PDF (accurate)
+        total_pages = getattr(doc, 'total_pages', None) or getattr(doc, 'total_pages_estimate', 1)
+        pages_are_accurate = getattr(doc, 'pages_are_accurate', suffix == '.pdf')
+        source_type = getattr(doc, 'source_type', suffix.replace('.', ''))
         
         return {
             'chunks': chunks,
             'title': doc.title or uploaded_file.name,
             'filename': uploaded_file.name,
-            'total_pages': doc.total_pages_estimate,
+            'total_pages': total_pages,
+            'pages_are_accurate': pages_are_accurate,  # NEW: track reliability
+            'source_type': source_type,  # NEW: 'docx' or 'pdf'
             'figures': getattr(doc, 'figures', {}),
+            'figure_captions': getattr(doc, 'figure_captions', {}),
+            'processed_images': processed_images,
             'raw_text': doc.raw_text,
-            'chunking_stats': stats
+            'chunking_stats': stats,
+            'tmp_path': tmp_path
         }
         
     except Exception as e:
         logger.exception("Error processing report")
-        print(f"[DEBUG] EXCEPTION in process_report: {e}")
-        import traceback
-        traceback.print_exc()
         st.error(f"Error processing file: {str(e)}")
         return None
 
@@ -210,33 +204,19 @@ def index_report(
     progress = st.progress(0, text="Indexing report...")
     
     try:
-        print(f"[DEBUG] index_report: Starting with {len(report_data['chunks'])} chunks")
-        
         vector_store.clear_report()
         progress.progress(20, text="Embedding report chunks...")
         
         report_texts = [c.content for c in report_data['chunks']]
-        print(f"[DEBUG] index_report: Embedding {len(report_texts)} texts")
-        print(f"[DEBUG] index_report: Sample text: {report_texts[0][:100]}...")
-        
         report_embeddings = embedder.embed_documents(report_texts)
-        print(f"[DEBUG] index_report: Embeddings shape: {report_embeddings.shape}")
         
         progress.progress(70, text="Storing in vector database...")
         
         report_dicts = [c.to_dict() for c in report_data['chunks']]
-        print(f"[DEBUG] index_report: Prepared {len(report_dicts)} chunk dicts")
-        print(f"[DEBUG] index_report: Sample chunk_id: {report_dicts[0].get('chunk_id', 'MISSING')}")
+        vector_store.add_report(report_dicts, report_embeddings)
         
-        added = vector_store.add_report(report_dicts, report_embeddings)
-        print(f"[DEBUG] index_report: add_report returned {added}")
-        
-        # Verify storage
         stats = vector_store.get_stats()
-        print(f"[DEBUG] index_report: Final stats: {stats}")
-        
         if stats.get('report_count', 0) == 0:
-            print(f"[DEBUG] index_report: CRITICAL - Vector store is empty!")
             st.error("Indexing failed - no documents stored!")
             return False
         
@@ -247,30 +227,34 @@ def index_report(
         
     except Exception as e:
         logger.exception("Error indexing report")
-        print(f"[DEBUG] index_report EXCEPTION: {e}")
-        import traceback
-        traceback.print_exc()
         st.error(f"Error indexing: {str(e)}")
         return False
 
 
-def extract_grade_from_evaluation(evaluation: str) -> str:
-    """Extract grade from evaluation text."""
-    import re
+def format_image_context(images: List[ProcessedImage]) -> str:
+    """Format image metadata as context for the LLM prompt."""
+    if not images:
+        return ""
     
-    # Try to find "Recommended Grade: X"
-    match = re.search(r'Recommended Grade[:\s]+\*?\*?(PASS|MERIT|REFERRAL)\*?\*?', evaluation, re.IGNORECASE)
-    if match:
-        return match.group(1).upper()
+    lines = [
+        "\n## FIGURES/IMAGES IN DOCUMENT",
+        f"The document contains {len(images)} figure(s)/image(s) provided for your analysis:",
+        ""
+    ]
     
-    # Fallback heuristics
-    eval_upper = evaluation.upper()
-    if 'REFERRAL' in eval_upper and ('NOT MET' in eval_upper or 'NOT FOUND' in eval_upper):
-        return 'REFERRAL'
-    elif 'MERIT' in eval_upper and 'EXCEEDS' in eval_upper:
-        return 'MERIT'
-    else:
-        return 'PASS'
+    for i, img in enumerate(images, 1):
+        desc = f"- **Figure {i}** ({img.image_id}): {img.width}x{img.height} {img.format}"
+        if img.caption:
+            desc += f'\n  Caption: "{img.caption}"'
+        if img.page:
+            desc += f" (Page {img.page})"
+        lines.append(desc)
+    
+    lines.append("")
+    lines.append("**IMPORTANT:** Examine these images carefully for charts, diagrams, tables, architecture diagrams, results plots, or other visual evidence relevant to the criterion.")
+    lines.append("")
+    
+    return "\n".join(lines)
 
 
 def evaluate_ksb(
@@ -278,13 +262,13 @@ def evaluate_ksb(
     embedder: Embedder,
     vector_store: ChromaStore,
     llm: OllamaClient,
-    search_settings: Dict[str, Any]
+    search_settings: Dict[str, Any],
+    images: Optional[List[ProcessedImage]] = None,
+    use_vision: bool = True,
+    pages_are_accurate: bool = False  # NEW: for PDF=True, DOCX=False
 ) -> Dict[str, Any]:
-    """Evaluate student work against a single KSB."""
+    """Evaluate student work against a single KSB with optional vision."""
     
-    print(f"\n[DEBUG] evaluate_ksb: {ksb.code} - {ksb.title[:50]}...")
-    
-    # Create retriever
     retriever = Retriever(
         embedder=embedder,
         vector_store=vector_store,
@@ -297,41 +281,53 @@ def evaluate_ksb(
     )
     
     query = f"{ksb.code} {ksb.title} {ksb.pass_criteria}"
-    print(f"[DEBUG] evaluate_ksb: Query: {query[:100]}...")
-    
     result = retriever.retrieve_for_criterion(query, ksb.code)
+    evidence_text = retriever.format_context_for_llm(result, pages_are_accurate=pages_are_accurate)
     
-    print(f"[DEBUG] evaluate_ksb: Retrieved {len(result.retrieved_chunks)} chunks")
-    print(f"[DEBUG] evaluate_ksb: Total tokens: {result.total_tokens}")
+    # Prepare images for vision model
+    image_base64_list = []
+    image_context = ""
     
-    if result.retrieved_chunks:
-        top_chunk = result.retrieved_chunks[0]
-        print(f"[DEBUG] evaluate_ksb: Top chunk similarity: {top_chunk.get('similarity', 'N/A')}")
-        print(f"[DEBUG] evaluate_ksb: Top chunk: {top_chunk.get('content', '')[:100]}...")
-    else:
-        print(f"[DEBUG] evaluate_ksb: NO CHUNKS RETRIEVED!")
+    if use_vision and images:
+        selected_images = images[:search_settings.get('max_images_per_ksb', 5)]
+        
+        if selected_images:
+            image_base64_list = [img.base64_data for img in selected_images]
+            image_context = format_image_context(selected_images)
+            logger.info(f"Including {len(selected_images)} images for {ksb.code} evaluation")
     
-    evidence_text = retriever.format_context_for_llm(result)
-    
+    # Format prompt with image context
     prompt = KSBPromptTemplates.format_ksb_evaluation(
         ksb_code=ksb.code,
         ksb_title=ksb.title,
         pass_criteria=ksb.pass_criteria,
         merit_criteria=ksb.merit_criteria,
         referral_criteria=ksb.referral_criteria,
-        evidence_text=evidence_text
+        evidence_text=evidence_text,
+        image_context=image_context
     )
     
     system_prompt = KSBPromptTemplates.get_system_prompt()
-    evaluation = llm.generate(
-        prompt=prompt,
-        system_prompt=system_prompt,
-        temperature=LLMConfig.EVALUATION_TEMPERATURE,
-        max_tokens=1500
-    )
     
-    grade = extract_grade_from_evaluation(evaluation)
-    print(f"[DEBUG] evaluate_ksb: Grade = {grade}")
+    # Generate evaluation WITH images if available
+    if image_base64_list:
+        logger.info(f"Calling LLM with {len(image_base64_list)} images for vision analysis")
+        evaluation = llm.generate(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=LLMConfig.EVALUATION_TEMPERATURE,
+            max_tokens=1500,
+            images=image_base64_list
+        )
+    else:
+        evaluation = llm.generate(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=LLMConfig.EVALUATION_TEMPERATURE,
+            max_tokens=1500
+        )
+    
+    grade_info = extract_grade_from_evaluation(evaluation)
     
     return {
         'ksb_code': ksb.code,
@@ -341,8 +337,9 @@ def evaluate_ksb(
         'merit_criteria': ksb.merit_criteria,
         'referral_criteria': ksb.referral_criteria,
         'evaluation': evaluation,
-        'grade': grade,
+        'grade': grade_info['grade'],
         'evidence_count': len(result.retrieved_chunks),
+        'images_analyzed': len(image_base64_list),
         'search_strategy': result.search_strategy,
         'query_variations': len(result.query_variations)
     }
@@ -360,7 +357,12 @@ def generate_overall_summary(ksb_evaluations: List[Dict[str, Any]], llm: OllamaC
     prompt = KSBPromptTemplates.format_overall_summary(evals_text)
     system_prompt = KSBPromptTemplates.get_system_prompt()
     
-    return llm.generate(prompt=prompt, system_prompt=system_prompt, temperature=LLMConfig.SUMMARY_TEMPERATURE, max_tokens=2000)
+    return llm.generate(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        temperature=LLMConfig.SUMMARY_TEMPERATURE,
+        max_tokens=2000
+    )
 
 
 def generate_feedback(
@@ -368,29 +370,16 @@ def generate_feedback(
     embedder: Embedder,
     vector_store: ChromaStore,
     llm: OllamaClient,
-    search_settings: Dict[str, Any]
+    search_settings: Dict[str, Any],
+    images: Optional[List[ProcessedImage]] = None,
+    use_vision: bool = True,
+    pages_are_accurate: bool = False  # NEW: for PDF=True, DOCX=False
 ) -> Optional[Dict[str, Any]]:
-    """Generate feedback for all KSBs."""
-    
-    print(f"\n[DEBUG] generate_feedback: Evaluating {len(ksb_criteria)} KSBs")
-    print(f"[DEBUG] generate_feedback: Search settings: {search_settings}")
-    
-    # Verify vector store
+    """Generate feedback for all KSBs with optional vision."""
     stats = vector_store.get_stats()
-    print(f"[DEBUG] generate_feedback: Vector store stats: {stats}")
-    
     if stats.get('report_count', 0) == 0:
-        print(f"[DEBUG] generate_feedback: CRITICAL - Vector store empty!")
         st.error("Vector store is empty!")
         return None
-    
-    # Test query
-    print(f"[DEBUG] generate_feedback: Testing query...")
-    test_emb = embedder.embed_query("data analysis hypothesis testing")
-    test_results = vector_store.query_report(test_emb, n_results=3)
-    print(f"[DEBUG] generate_feedback: Test query returned {len(test_results)} results")
-    if test_results:
-        print(f"[DEBUG] generate_feedback: Test top similarity: {test_results[0].get('similarity', 'N/A')}")
     
     ksb_evaluations = []
     total_ksbs = len(ksb_criteria)
@@ -399,21 +388,29 @@ def generate_feedback(
     status_text = st.empty()
     
     for i, ksb in enumerate(ksb_criteria):
-        status_text.markdown(f"**Evaluating {ksb.code}:** {ksb.title[:50]}...")
+        vision_status = f" (with {len(images)} images)" if use_vision and images else ""
+        status_text.markdown(f"**Evaluating {ksb.code}:** {ksb.title[:50]}...{vision_status}")
         
         try:
-            eval_result = evaluate_ksb(ksb, embedder, vector_store, llm, search_settings)
+            eval_result = evaluate_ksb(
+                ksb, embedder, vector_store, llm, search_settings,
+                images=images, use_vision=use_vision,
+                pages_are_accurate=pages_are_accurate  # NEW: pass to evaluate_ksb
+            )
             ksb_evaluations.append(eval_result)
         except Exception as e:
             logger.exception(f"Error evaluating {ksb.code}")
-            print(f"[DEBUG] EXCEPTION evaluating {ksb.code}: {e}")
             ksb_evaluations.append({
                 'ksb_code': ksb.code,
                 'ksb_title': ksb.title,
                 'ksb_category': ksb.category,
+                'pass_criteria': ksb.pass_criteria,
+                'merit_criteria': ksb.merit_criteria,
+                'referral_criteria': ksb.referral_criteria,
                 'evaluation': f"Error: {str(e)}",
                 'grade': 'ERROR',
                 'evidence_count': 0,
+                'images_analyzed': 0,
                 'search_strategy': 'N/A',
                 'query_variations': 0
             })
@@ -429,7 +426,9 @@ def generate_feedback(
     return {
         'ksb_evaluations': ksb_evaluations,
         'overall_summary': overall_summary,
-        'search_settings': search_settings
+        'search_settings': search_settings,
+        'vision_enabled': use_vision and images is not None and len(images) > 0,
+        'total_images': len(images) if images else 0
     }
 
 
@@ -457,9 +456,13 @@ def display_feedback(results: Dict[str, Any]):
     
     if 'search_settings' in results:
         settings = results['search_settings']
+        vision_info = ""
+        if results.get('vision_enabled'):
+            vision_info = f" | 🖼️ Vision: {results.get('total_images', 0)} images"
         st.info(f"Search: {'Hybrid' if settings['use_hybrid'] else 'Semantic'} | "
                 f"Weights: S:{int(settings['semantic_weight']*100)}%/K:{int(settings['keyword_weight']*100)}% | "
-                f"Threshold: {settings['similarity_threshold']} | Top-K: {settings['report_top_k']}")
+                f"Threshold: {settings['similarity_threshold']} | Top-K: {settings['report_top_k']}"
+                f"{vision_info}")
     
     st.markdown("## 📝 Overall Assessment")
     st.markdown(results.get('overall_summary', 'No summary available.'))
@@ -469,9 +472,12 @@ def display_feedback(results: Dict[str, Any]):
     for eval_data in results.get('ksb_evaluations', []):
         grade = eval_data.get('grade', 'N/A')
         grade_icon = "🟢" if grade == 'MERIT' else "🟡" if grade == 'PASS' else "🔴"
+        images_info = f", 🖼️{eval_data.get('images_analyzed', 0)}" if eval_data.get('images_analyzed', 0) > 0 else ""
         
-        with st.expander(f"{grade_icon} **{eval_data['ksb_code']}** - {eval_data['ksb_title'][:50]}... [{grade}] ({eval_data.get('evidence_count', 0)} chunks)"):
-            st.markdown(f"**Search:** {eval_data.get('search_strategy', 'N/A')} | **Evidence chunks:** {eval_data.get('evidence_count', 0)}")
+        with st.expander(f"{grade_icon} **{eval_data['ksb_code']}** - {eval_data['ksb_title'][:50]}... [{grade}] ({eval_data.get('evidence_count', 0)} chunks{images_info})"):
+            st.markdown(f"**Search:** {eval_data.get('search_strategy', 'N/A')} | "
+                       f"**Evidence chunks:** {eval_data.get('evidence_count', 0)} | "
+                       f"**Images analyzed:** {eval_data.get('images_analyzed', 0)}")
             
             tabs = st.tabs(["Pass Criteria", "Merit Criteria", "Referral Criteria"])
             with tabs[0]:
@@ -527,6 +533,24 @@ def render_search_settings():
                f"Thresh:{st.session_state.similarity_threshold} | K:{st.session_state.report_top_k}")
 
 
+def render_vision_settings():
+    """Render vision settings panel."""
+    st.markdown("## 🖼️ Vision Settings")
+    
+    use_vision = st.toggle("Enable Vision Analysis", value=st.session_state.use_vision,
+                           help="Analyze images, charts, and figures in the document")
+    if use_vision != st.session_state.use_vision:
+        st.session_state.use_vision = use_vision
+    
+    if use_vision:
+        max_images = st.slider("Max images per KSB", 1, 10, st.session_state.max_images_per_ksb, 1,
+                               help="Maximum number of images to send to vision model per criterion")
+        if max_images != st.session_state.max_images_per_ksb:
+            st.session_state.max_images_per_ksb = max_images
+        
+        st.caption("⚠️ Vision analysis increases processing time but allows the model to understand charts, diagrams, and figures.")
+
+
 def get_current_search_settings() -> Dict[str, Any]:
     """Get current search settings."""
     return {
@@ -534,7 +558,8 @@ def get_current_search_settings() -> Dict[str, Any]:
         'semantic_weight': st.session_state.semantic_weight,
         'keyword_weight': st.session_state.keyword_weight,
         'similarity_threshold': st.session_state.similarity_threshold,
-        'report_top_k': st.session_state.report_top_k
+        'report_top_k': st.session_state.report_top_k,
+        'max_images_per_ksb': st.session_state.max_images_per_ksb
     }
 
 
@@ -543,13 +568,14 @@ def main():
     init_session_state()
     
     st.markdown('<p class="main-header">📝 KSB Coursework Marker</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">AI-powered KSB assessment with hybrid search (DEBUG MODE)</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">AI-powered KSB assessment with vision support for charts & figures</p>', unsafe_allow_html=True)
     
     with st.sidebar:
         st.markdown("## ⚡ Status")
         
         llm = load_ollama_client()
         embedder = load_embedder()
+        image_processor = load_image_processor()
         
         if llm:
             st.markdown('<div class="status-ok">✓ Ollama Connected</div>', unsafe_allow_html=True)
@@ -563,12 +589,20 @@ def main():
         else:
             st.markdown('<div class="status-error">✗ Embedder Error</div>', unsafe_allow_html=True)
         
+        if image_processor:
+            st.markdown('<div class="status-ok">✓ Vision Ready</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="status-error">✗ Vision Unavailable</div>', unsafe_allow_html=True)
+        
         st.markdown("## 📚 Module")
         
         modules = get_available_modules()
         module_options = {code: info['name'] for code, info in modules.items()}
-        selected_module = st.selectbox("Module", list(module_options.keys()), format_func=lambda x: module_options[x],
-                                       index=list(module_options.keys()).index(st.session_state.selected_module))
+        selected_module = st.selectbox(
+            "Module", list(module_options.keys()),
+            format_func=lambda x: module_options[x],
+            index=list(module_options.keys()).index(st.session_state.selected_module)
+        )
         
         if selected_module != st.session_state.selected_module:
             st.session_state.selected_module = selected_module
@@ -583,35 +617,54 @@ def main():
         st.caption(f"{len(st.session_state.ksb_criteria)} KSBs to assess")
         
         render_search_settings()
+        render_vision_settings()
         
         if st.button("🔄 Reset All"):
-            for key in ['report_data', 'feedback_results', 'feedback_generated', 'ksb_criteria']:
+            for key in ['report_data', 'processed_images', 'feedback_results', 'feedback_generated', 'ksb_criteria']:
                 st.session_state[key] = None if key != 'feedback_generated' else False
             st.rerun()
     
-    # Main content
     st.markdown("## 📄 Student Report")
     
     uploaded_file = st.file_uploader("Upload report", type=['docx', 'pdf'])
     
     if uploaded_file:
         if st.session_state.report_data is None or st.session_state.report_data.get('filename') != uploaded_file.name:
-            with st.spinner("Processing report..."):
-                report_data = process_report(uploaded_file)
+            with st.spinner("Processing report (including images)..."):
+                report_data = process_report(uploaded_file, image_processor)
                 if report_data:
                     st.session_state.report_data = report_data
+                    st.session_state.processed_images = report_data.get('processed_images', [])
                     st.session_state.feedback_generated = False
                     st.session_state.feedback_results = None
         
         if st.session_state.report_data:
             report = st.session_state.report_data
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Pages", report['total_pages'])
+                # Show if pages are accurate or estimated
+                if report.get('pages_are_accurate', False):
+                    st.metric("Pages", report['total_pages'])
+                else:
+                    st.metric("Pages (est.)", f"~{report['total_pages']}")
             with col2:
                 st.metric("Chunks", len(report['chunks']))
             with col3:
                 st.metric("Chars", len(report['raw_text']))
+            with col4:
+                num_images = len(report.get('processed_images', []))
+                st.metric("🖼️ Images", num_images)
+            
+            # Show warning for DOCX page estimates
+            if not report.get('pages_are_accurate', False):
+                st.caption("⚠️ Page numbers are estimates for DOCX files. Sections are more reliable for citations.")
+            
+            if st.session_state.processed_images:
+                with st.expander(f"📷 Preview extracted images ({len(st.session_state.processed_images)} found)"):
+                    for img in st.session_state.processed_images[:5]:
+                        st.caption(f"**{img.image_id}** - {img.width}x{img.height} {img.format}")
+                        if img.caption:
+                            st.caption(f"Caption: {img.caption}")
     
     can_generate = (
         st.session_state.report_data is not None and
@@ -620,7 +673,11 @@ def main():
         st.session_state.embedder_loaded
     )
     
-    if st.button("🚀 Generate KSB Assessment", type="primary", disabled=not can_generate, use_container_width=True):
+    vision_status = ""
+    if st.session_state.use_vision and st.session_state.processed_images:
+        vision_status = f" (with {len(st.session_state.processed_images)} images)"
+    
+    if st.button(f"🚀 Generate KSB Assessment{vision_status}", type="primary", disabled=not can_generate, use_container_width=True):
         search_settings = get_current_search_settings()
         
         tmpdir = tempfile.mkdtemp()
@@ -630,22 +687,28 @@ def main():
         success = index_report(st.session_state.report_data, embedder, vector_store)
         
         if success:
-            # DEBUG: Verify indexing
             stats = vector_store.get_stats()
-            print(f"[DEBUG main] After indexing: {stats}")
             
             if stats.get('report_count', 0) > 0:
-                # DEBUG: Test query
-                test_emb = embedder.embed_query("hypothesis testing statistical analysis")
-                test_results = vector_store.query_report(test_emb, n_results=3)
-                print(f"[DEBUG main] Test query: {len(test_results)} results")
-                
                 st.markdown("### 🤖 Evaluating Against KSBs")
+                
+                if st.session_state.use_vision and st.session_state.processed_images:
+                    st.success(f"🖼️ Vision enabled: {len(st.session_state.processed_images)} images will be analyzed")
+                
                 st.info(f"Search: {st.session_state.search_preset} | "
                        f"{'Hybrid' if search_settings['use_hybrid'] else 'Semantic'} | "
                        f"Threshold: {search_settings['similarity_threshold']}")
                 
-                results = generate_feedback(st.session_state.ksb_criteria, embedder, vector_store, llm, search_settings)
+                results = generate_feedback(
+                    st.session_state.ksb_criteria,
+                    embedder,
+                    vector_store,
+                    llm,
+                    search_settings,
+                    images=st.session_state.processed_images if st.session_state.use_vision else None,
+                    use_vision=st.session_state.use_vision,
+                    pages_are_accurate=st.session_state.report_data.get('pages_are_accurate', False)
+                )
                 
                 if results:
                     st.session_state.feedback_results = results
@@ -663,18 +726,25 @@ def main():
         
         export_text = "# KSB Assessment Report\n\n"
         export_text += f"**Module:** {st.session_state.selected_module}\n"
-        export_text += f"**Date:** {time.strftime('%Y-%m-%d %H:%M')}\n\n"
+        export_text += f"**Date:** {time.strftime('%Y-%m-%d %H:%M')}\n"
+        if st.session_state.feedback_results.get('vision_enabled'):
+            export_text += f"**Vision Analysis:** Enabled ({st.session_state.feedback_results.get('total_images', 0)} images)\n"
+        export_text += "\n"
         
-        export_text += "## Summary\n\n| KSB | Grade | Evidence |\n|-----|-------|----------|\n"
+        export_text += "## Summary\n\n| KSB | Grade | Evidence | Images |\n|-----|-------|----------|--------|\n"
         for e in st.session_state.feedback_results.get('ksb_evaluations', []):
-            export_text += f"| {e['ksb_code']} | {e['grade']} | {e.get('evidence_count', 0)} |\n"
+            export_text += f"| {e['ksb_code']} | {e['grade']} | {e.get('evidence_count', 0)} | {e.get('images_analyzed', 0)} |\n"
         
         export_text += f"\n\n## Overall\n\n{st.session_state.feedback_results.get('overall_summary', '')}\n\n"
         
         for e in st.session_state.feedback_results.get('ksb_evaluations', []):
             export_text += f"\n---\n\n## {e['ksb_code']} - {e['ksb_title']}\n\n**Grade: {e['grade']}**\n\n{e.get('evaluation', '')}\n"
         
-        st.download_button("📥 Download (Markdown)", export_text, f"assessment_{st.session_state.selected_module.lower()}_{time.strftime('%Y%m%d')}.md", "text/markdown")
+        st.download_button(
+            "📥 Download (Markdown)", export_text,
+            f"assessment_{st.session_state.selected_module.lower()}_{time.strftime('%Y%m%d')}.md",
+            "text/markdown"
+        )
 
 
 if __name__ == "__main__":

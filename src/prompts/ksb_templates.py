@@ -1,49 +1,41 @@
 """
-KSB Evaluation Prompts - Improved version with structured output.
-
-Key Improvements:
-1. STRUCTURED OUTPUT - JSON blocks for reliable grade extraction
-2. EVIDENCE-FIRST - Must cite before assessing
-3. STRICT GROUNDING - Explicit rules to prevent hallucination
-4. SHORTER PROMPTS - Focused instructions that won't be ignored
+KSB Evaluation Prompts - Structured output for reliable grade extraction.
+Includes vision support for analyzing charts, figures, and tables.
 """
+import re
+import json
+from typing import Dict, Any
 
 
 class KSBPromptTemplates:
-    """
-    Prompt templates for KSB-based coursework evaluation.
-    
-    Design principles:
-    - Structured output for reliable parsing
-    - Evidence-first workflow to ground assessments
-    - Explicit "not found" language to prevent invention
-    - Concise instructions for better compliance
-    """
-    
-    # ==========================================================================
-    # SYSTEM PROMPT - Shorter, more focused
-    # ==========================================================================
+    """Prompt templates for KSB-based coursework evaluation with vision support."""
     
     SYSTEM_PROMPT_KSB_MARKER = """You are an academic assessor evaluating apprenticeship coursework against KSB criteria.
 
 CORE RULES (MUST FOLLOW):
 
 1. EVIDENCE-FIRST: List evidence BEFORE making any judgement
-2. CITE EXACTLY: Only use page/section numbers shown in the evidence headers
-3. NO INVENTION: If evidence doesn't exist, write "NOT FOUND" - never invent quotes
-4. GRADE HONESTLY: Base grade ONLY on evidence present, not assumptions
+2. CITE BY SECTION: Use section numbers as primary reference (e.g., "Section 3", "Section 5")
+3. PAGE ESTIMATES: Page numbers with ~ are estimates - prefer section numbers when available
+4. NO INVENTION: If evidence doesn't exist, write "NOT FOUND" - never invent quotes or section numbers
+5. GRADE HONESTLY: Base grade ONLY on evidence present, not assumptions
+6. ANALYZE IMAGES: When images/figures/charts are provided, examine them carefully for evidence
 
 GRADING SCALE:
 - REFERRAL: Pass criteria NOT met (significant gaps)
 - PASS: Pass criteria met (basic requirements satisfied)  
 - MERIT: Pass criteria met AND Merit criteria substantially met
 
+IMAGE/FIGURE ANALYSIS:
+When images are provided, you MUST:
+- Examine charts and graphs for data presentation quality
+- Check architecture diagrams for system design understanding
+- Review tables for data analysis and organization
+- Note figure quality, labeling, and relevance
+- Reference specific figures as evidence (e.g., "Figure 1 shows...")
+
 OUTPUT FORMAT: You MUST include a JSON block with your grade decision. This is mandatory."""
 
-    # ==========================================================================
-    # KSB EVALUATION PROMPT - Structured output
-    # ==========================================================================
-    
     KSB_EVALUATION_PROMPT = """Evaluate this student's work against the KSB criterion below.
 
 ## KSB CRITERION
@@ -59,7 +51,7 @@ OUTPUT FORMAT: You MUST include a JSON block with your grade decision. This is m
 ## EVIDENCE FROM SUBMISSION
 
 {evidence_text}
-
+{image_context}
 ---
 
 ## YOUR TASK
@@ -68,19 +60,23 @@ Follow these steps IN ORDER:
 
 ### STEP 1: LIST EVIDENCE
 
-Search the evidence above and list ALL relevant quotes. Use this EXACT format:
+Search the evidence above (including any images/figures provided) and list ALL relevant content. Use this EXACT format:
 
 **Evidence Found:**
-- [E1] "quote here" (page X, Section Y) 
-- [E2] "quote here" (page X, Section Y)
-- [E3] ...
+- [E1] "quote here" (Section X) 
+- [E2] "quote here" (Section Y)
+- [E3] Figure/Chart: [describe what the figure shows and why it's relevant]
+- ...
 
 If no relevant evidence exists, write: **Evidence Found:** NONE
 
 RULES:
-- Only use page/section numbers that appear in evidence headers above
-- Do NOT invent section numbers like "2.1" or "3.2" if not shown
+- Use SECTION numbers as your primary citation (e.g., "Section 3", "Section 5")
+- Page numbers with ~ are estimates - prefer section numbers when available
+- Only cite sections/pages that appear in evidence headers above
+- Do NOT invent section numbers like "2.1" or "3.2" unless shown in headers
 - Quote actual text, do not paraphrase and claim it's a quote
+- For figures/images: describe what you observe and its relevance to the criterion
 
 ### STEP 2: ASSESS PASS CRITERIA
 
@@ -116,6 +112,7 @@ You MUST output this JSON block (copy this structure exactly):
 ### STEP 5: BRIEF JUSTIFICATION
 
 2-3 sentences explaining your grade decision, referencing your evidence labels [E1], [E2] etc.
+Include observations from figures/charts if they contributed to your assessment.
 
 ### STEP 6: IMPROVEMENTS NEEDED
 
@@ -127,12 +124,9 @@ If MERIT: Note what made this strong.
 REMINDER: 
 - If evidence is missing, grade as REFERRAL with confidence LOW
 - If Pass criteria are clearly met, do NOT give REFERRAL
-- Use only the citation format from evidence headers"""
+- Cite by SECTION number (e.g., "Section 3") - page numbers are estimates
+- Analyze any provided figures/charts for relevant evidence"""
 
-    # ==========================================================================
-    # OVERALL SUMMARY PROMPT
-    # ==========================================================================
-    
     KSB_OVERALL_SUMMARY_PROMPT = """Summarize the KSB evaluations below into an overall assessment.
 
 ## KSB EVALUATIONS
@@ -185,10 +179,6 @@ Write 2-3 paragraphs covering:
 
 Keep tone constructive and specific."""
 
-    # ==========================================================================
-    # HELPER METHODS
-    # ==========================================================================
-    
     @classmethod
     def format_ksb_evaluation(
         cls,
@@ -197,16 +187,18 @@ Keep tone constructive and specific."""
         pass_criteria: str,
         merit_criteria: str,
         referral_criteria: str,
-        evidence_text: str
+        evidence_text: str,
+        image_context: str = ""
     ) -> str:
-        """Format the KSB evaluation prompt."""
+        """Format the KSB evaluation prompt with optional image context."""
         return cls.KSB_EVALUATION_PROMPT.format(
             ksb_code=ksb_code,
             ksb_title=ksb_title,
             pass_criteria=pass_criteria,
             merit_criteria=merit_criteria,
             referral_criteria=referral_criteria,
-            evidence_text=evidence_text
+            evidence_text=evidence_text,
+            image_context=image_context
         )
     
     @classmethod
@@ -220,15 +212,6 @@ Keep tone constructive and specific."""
     def get_system_prompt(cls) -> str:
         """Get the system prompt for KSB evaluation."""
         return cls.SYSTEM_PROMPT_KSB_MARKER
-
-
-# =============================================================================
-# GRADE EXTRACTION UTILITIES
-# =============================================================================
-
-import re
-import json
-from typing import Optional, Dict, Any
 
 
 def extract_grade_from_evaluation(evaluation: str) -> Dict[str, Any]:
@@ -308,7 +291,6 @@ def extract_grade_from_evaluation(evaluation: str) -> Dict[str, Any]:
     # Method 4: Keyword heuristics (least reliable)
     eval_upper = evaluation.upper()
     
-    # Count indicators
     referral_indicators = [
         'NOT MET' in eval_upper,
         'SIGNIFICANT GAP' in eval_upper,
@@ -347,102 +329,3 @@ def extract_grade_from_evaluation(evaluation: str) -> Dict[str, Any]:
     result['method'] = 'heuristic'
     
     return result
-
-
-def validate_citations(evaluation: str, evidence_text: str) -> Dict[str, Any]:
-    """
-    Validate that citations in the evaluation match the provided evidence.
-    
-    Returns:
-        Dict with validation results
-    """
-    # Extract page/section references from evidence headers
-    evidence_refs = set()
-    
-    # Match patterns like "(page 1, Section 2)" or "(page 1 / Section 2)"
-    ref_pattern = r'\(page\s+(\d+)[,/\s]+(?:Section\s+)?(\d+(?:\.\d+)?)\)'
-    for match in re.finditer(ref_pattern, evidence_text, re.IGNORECASE):
-        page, section = match.groups()
-        evidence_refs.add((page, section))
-    
-    # Also match simpler patterns
-    page_pattern = r'page\s+(\d+)'
-    for match in re.finditer(page_pattern, evidence_text, re.IGNORECASE):
-        evidence_refs.add((match.group(1), None))
-    
-    # Extract citations from evaluation
-    eval_citations = []
-    for match in re.finditer(ref_pattern, evaluation, re.IGNORECASE):
-        page, section = match.groups()
-        eval_citations.append({
-            'page': page,
-            'section': section,
-            'valid': (page, section) in evidence_refs or (page, None) in evidence_refs
-        })
-    
-    valid_count = sum(1 for c in eval_citations if c['valid'])
-    invalid_citations = [c for c in eval_citations if not c['valid']]
-    
-    return {
-        'total_citations': len(eval_citations),
-        'valid_citations': valid_count,
-        'invalid_citations': invalid_citations,
-        'evidence_refs_found': list(evidence_refs),
-        'citation_accuracy': valid_count / len(eval_citations) if eval_citations else 1.0
-    }
-
-
-# =============================================================================
-# EXAMPLE OUTPUT (for reference/testing)
-# =============================================================================
-
-EXAMPLE_EVALUATION_OUTPUT = """
-### STEP 1: LIST EVIDENCE
-
-**Evidence Found:**
-- [E1] "Used supervised learning (text classification) to meet a business objective: faster, more consistent support ticket triage." (page 1, Section 1)
-- [E2] "The business goal is to improve triage speed, consistency, and reporting in a GDPR-compliant way while controlling cost." (page 1, Section 1)
-- [E3] "Defined evaluation metrics aligned to the operational goal (e.g., per-class recall for urgent cases)." (page 7, Section 7)
-
-### STEP 2: ASSESS PASS CRITERIA
-
-| Pass Requirement | Status | Evidence |
-|------------------|--------|----------|
-| States clear business problem | ✅ MET | [E2] |
-| Identifies appropriate ML approach | ✅ MET | [E1] |
-| Describes why approach fits objective | ✅ MET | [E1], [E3] |
-
-### STEP 3: ASSESS MERIT CRITERIA
-
-| Merit Requirement | Status | Evidence |
-|-------------------|--------|----------|
-| Strong problem framing | ✅ MET | [E2] clear business context |
-| Justifies methodology choices | ⚠️ PARTIAL | [E1] explains text classification but no comparison to alternatives |
-| Alternatives considered | ❌ NOT MET | not found |
-| Reasoned selection tied to outcomes | ✅ MET | [E3] |
-
-### STEP 4: GRADE DECISION
-
-```json
-{
-  "ksb_code": "K1",
-  "grade": "PASS",
-  "confidence": "HIGH",
-  "pass_criteria_met": true,
-  "merit_criteria_met": false,
-  "key_evidence": ["E1", "E2", "E3"],
-  "main_gap": "No comparison to alternative approaches (baseline, traditional ML)"
-}
-```
-
-### STEP 5: BRIEF JUSTIFICATION
-
-The submission clearly meets all Pass criteria with strong evidence [E1], [E2], [E3] showing a well-defined business problem and appropriate ML approach. However, Merit criteria are only partially met because while the methodology is explained, there is no explicit comparison to alternatives or baseline approaches.
-
-### STEP 6: IMPROVEMENTS NEEDED
-
-To achieve MERIT:
-1. Add a brief comparison of why neural network text classification was chosen over traditional ML (SVM, Naive Bayes) or rule-based approaches
-2. Include a baseline comparison showing expected improvement over manual triage
-3. Quantify the expected accuracy/speed improvement that justifies the ML approach
-"""

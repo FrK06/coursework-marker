@@ -1,7 +1,5 @@
 """
-ChromaDB Vector Store - Enhanced with keyword storage for hybrid search.
-
-DEBUG VERSION - Added logging to identify retrieval failures.
+ChromaDB Vector Store - Storage for document embeddings.
 """
 from typing import List, Dict, Any, Optional
 from pathlib import Path
@@ -20,14 +18,13 @@ logger = logging.getLogger(__name__)
 
 class ChromaStore:
     """
-    Enhanced ChromaDB-based vector store.
+    ChromaDB-based vector store.
     
     Features:
     - Separate collections for criteria and reports
     - Keyword metadata for hybrid search
     - Section-aware filtering
     - Batch operations
-    - Robust error handling
     """
     
     def __init__(
@@ -36,13 +33,8 @@ class ChromaStore:
         criteria_collection: str = "criteria",
         report_collection: str = "report"
     ):
-        """
-        Initialize the ChromaDB store.
-        """
         if chromadb is None:
-            raise ImportError(
-                "chromadb is required. Install with: pip install chromadb"
-            )
+            raise ImportError("chromadb is required. Install with: pip install chromadb")
         
         self.persist_directory = Path(persist_directory)
         self.persist_directory.mkdir(parents=True, exist_ok=True)
@@ -50,20 +42,14 @@ class ChromaStore:
         self.criteria_collection_name = criteria_collection
         self.report_collection_name = report_collection
         
-        # Initialize client with persistence
         self.client = chromadb.PersistentClient(
             path=str(self.persist_directory),
-            settings=Settings(
-                anonymized_telemetry=False,
-                allow_reset=True
-            )
+            settings=Settings(anonymized_telemetry=False, allow_reset=True)
         )
         
-        # Collections will be lazily initialized
         self._criteria_collection = None
         self._report_collection = None
         
-        print(f"[DEBUG ChromaStore] Initialized at {self.persist_directory}")
         logger.info(f"ChromaDB initialized at {self.persist_directory}")
     
     @property
@@ -74,7 +60,6 @@ class ChromaStore:
                 name=self.criteria_collection_name,
                 metadata={"description": "Marking criteria and rubrics"}
             )
-            print(f"[DEBUG ChromaStore] Criteria collection ready: {self.criteria_collection_name}")
         return self._criteria_collection
     
     @property
@@ -85,16 +70,11 @@ class ChromaStore:
                 name=self.report_collection_name,
                 metadata={"description": "Student report chunks"}
             )
-            print(f"[DEBUG ChromaStore] Report collection ready: {self.report_collection_name}")
         return self._report_collection
     
     def _prepare_metadata(self, chunk: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Prepare metadata for ChromaDB storage.
-        
-        ChromaDB requires flat dict with simple types (str, int, float, bool).
-        """
-        metadata = {
+        """Prepare metadata for ChromaDB storage."""
+        return {
             'document_type': str(chunk.get('document_type', '')),
             'page_start': int(chunk.get('page_start', 1)),
             'page_end': int(chunk.get('page_end', 1)),
@@ -109,55 +89,29 @@ class ChromaStore:
             'parent_section': str(chunk.get('parent_section', ''))[:200],
             'chunk_index': int(chunk.get('chunk_index', 0)),
         }
-        
-        return metadata
     
     def add_criteria(
-        self,
-        chunks: List[Dict[str, Any]],
-        embeddings: np.ndarray,
-        batch_size: int = 100
+        self, chunks: List[Dict[str, Any]], embeddings: np.ndarray, batch_size: int = 100
     ) -> int:
         """Add criteria chunks to the store."""
-        return self._add_to_collection(
-            self.criteria_collection,
-            chunks,
-            embeddings,
-            batch_size
-        )
+        return self._add_to_collection(self.criteria_collection, chunks, embeddings, batch_size)
     
     def add_report(
-        self,
-        chunks: List[Dict[str, Any]],
-        embeddings: np.ndarray,
-        batch_size: int = 100
+        self, chunks: List[Dict[str, Any]], embeddings: np.ndarray, batch_size: int = 100
     ) -> int:
         """Add report chunks to the store."""
-        print(f"[DEBUG ChromaStore] add_report: {len(chunks)} chunks, embeddings shape={embeddings.shape}")
-        return self._add_to_collection(
-            self.report_collection,
-            chunks,
-            embeddings,
-            batch_size
-        )
+        return self._add_to_collection(self.report_collection, chunks, embeddings, batch_size)
     
     def _add_to_collection(
-        self,
-        collection,
-        chunks: List[Dict[str, Any]],
-        embeddings: np.ndarray,
-        batch_size: int = 100
+        self, collection, chunks: List[Dict[str, Any]],
+        embeddings: np.ndarray, batch_size: int = 100
     ) -> int:
         """Add chunks to a collection in batches."""
         if not chunks:
-            print(f"[DEBUG ChromaStore] _add_to_collection: No chunks to add!")
             return 0
         
         total_added = 0
         
-        print(f"[DEBUG ChromaStore] Adding {len(chunks)} chunks to '{collection.name}'")
-        
-        # Process in batches
         for i in range(0, len(chunks), batch_size):
             batch_chunks = chunks[i:i + batch_size]
             batch_embeddings = embeddings[i:i + batch_size]
@@ -172,12 +126,7 @@ class ChromaStore:
                 documents.append(chunk.get('content', ''))
                 metadatas.append(self._prepare_metadata(chunk))
             
-            # Convert embeddings to list
             embeddings_list = batch_embeddings.tolist()
-            
-            print(f"[DEBUG ChromaStore] Batch {i//batch_size + 1}: {len(ids)} items")
-            print(f"[DEBUG ChromaStore]   Sample ID: {ids[0][:50]}...")
-            print(f"[DEBUG ChromaStore]   Sample doc: {len(documents[0])} chars")
             
             try:
                 collection.add(
@@ -187,37 +136,25 @@ class ChromaStore:
                     embeddings=embeddings_list
                 )
                 total_added += len(batch_chunks)
-                print(f"[DEBUG ChromaStore]   Batch added OK")
             except Exception as e:
-                print(f"[DEBUG ChromaStore]   ERROR adding batch: {e}")
                 logger.error(f"Error adding batch to collection: {e}")
-                # Try adding one by one
                 for j, (id_, doc, meta, emb) in enumerate(
                     zip(ids, documents, metadatas, embeddings_list)
                 ):
                     try:
                         collection.add(
-                            ids=[id_],
-                            documents=[doc],
-                            metadatas=[meta],
-                            embeddings=[emb]
+                            ids=[id_], documents=[doc],
+                            metadatas=[meta], embeddings=[emb]
                         )
                         total_added += 1
                     except Exception as e2:
-                        print(f"[DEBUG ChromaStore]   ERROR adding {id_}: {e2}")
                         logger.error(f"Error adding chunk {id_}: {e2}")
-        
-        # Verify
-        final_count = collection.count()
-        print(f"[DEBUG ChromaStore] Collection '{collection.name}' now has {final_count} docs (added {total_added})")
         
         logger.info(f"Added {total_added} chunks to {collection.name}")
         return total_added
     
     def query_criteria(
-        self,
-        query_embedding: np.ndarray,
-        n_results: int = 5,
+        self, query_embedding: np.ndarray, n_results: int = 5,
         filter_criterion: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Query the criteria collection."""
@@ -225,32 +162,21 @@ class ChromaStore:
         if filter_criterion:
             where_filter = {"criterion_id": filter_criterion}
         
-        return self._query_collection(
-            self.criteria_collection,
-            query_embedding,
-            n_results,
-            where_filter
-        )
+        return self._query_collection(self.criteria_collection, query_embedding, n_results, where_filter)
     
     def query_report(
-        self,
-        query_embedding: np.ndarray,
-        n_results: int = 5,
+        self, query_embedding: np.ndarray, n_results: int = 5,
         filter_section: Optional[str] = None,
         filter_has_figures: Optional[bool] = None,
         filter_page_range: Optional[tuple] = None
     ) -> List[Dict[str, Any]]:
-        """
-        Query the report collection with optional filters.
-        """
+        """Query the report collection with optional filters."""
         where_clauses = []
         
         if filter_section:
             where_clauses.append({"section_title": {"$eq": filter_section}})
-        
         if filter_has_figures is not None:
             where_clauses.append({"has_figure_reference": {"$eq": filter_has_figures}})
-        
         if filter_page_range:
             start_page, end_page = filter_page_range
             where_clauses.append({"page_start": {"$gte": start_page}})
@@ -262,51 +188,18 @@ class ChromaStore:
         elif len(where_clauses) > 1:
             where_filter = {"$and": where_clauses}
         
-        print(f"[DEBUG ChromaStore] query_report: n_results={n_results}")
-        return self._query_collection(
-            self.report_collection,
-            query_embedding,
-            n_results,
-            where_filter
-        )
-    
-    def query_by_keywords(
-        self,
-        keywords: List[str],
-        collection_name: str = "report",
-        n_results: int = 10
-    ) -> List[Dict[str, Any]]:
-        """Query collection by keywords."""
-        collection = (
-            self.report_collection 
-            if collection_name == "report" 
-            else self.criteria_collection
-        )
-        
-        results = collection.query(
-            query_texts=[' '.join(keywords)],
-            n_results=n_results,
-            include=["documents", "metadatas", "distances"]
-        )
-        
-        return self._format_results(results)
+        return self._query_collection(self.report_collection, query_embedding, n_results, where_filter)
     
     def _query_collection(
-        self,
-        collection,
-        query_embedding: np.ndarray,
-        n_results: int,
-        where_filter: Optional[Dict] = None
+        self, collection, query_embedding: np.ndarray,
+        n_results: int, where_filter: Optional[Dict] = None
     ) -> List[Dict[str, Any]]:
         """Query a collection and return formatted results."""
         if isinstance(query_embedding, np.ndarray):
             query_embedding = query_embedding.tolist()
         
         collection_count = collection.count()
-        print(f"[DEBUG ChromaStore] _query_collection: '{collection.name}' has {collection_count} docs, requesting {n_results}")
-        
         if collection_count == 0:
-            print(f"[DEBUG ChromaStore]   WARNING: Collection is EMPTY!")
             return []
         
         try:
@@ -316,20 +209,8 @@ class ChromaStore:
                 where=where_filter,
                 include=["documents", "metadatas", "distances"]
             )
-            
-            num_results = len(results['ids'][0]) if results['ids'] and results['ids'][0] else 0
-            print(f"[DEBUG ChromaStore]   Query returned {num_results} results")
-            
-            if num_results > 0:
-                print(f"[DEBUG ChromaStore]   Top result distance: {results['distances'][0][0]:.4f}")
-                print(f"[DEBUG ChromaStore]   Top result preview: {results['documents'][0][0][:80]}...")
-            
             return self._format_results(results)
-            
         except Exception as e:
-            print(f"[DEBUG ChromaStore]   EXCEPTION: {e}")
-            import traceback
-            traceback.print_exc()
             logger.error(f"Error querying collection: {e}")
             return []
     
@@ -354,9 +235,7 @@ class ChromaStore:
     def get_all_criteria(self) -> List[Dict[str, Any]]:
         """Get all criteria chunks."""
         try:
-            result = self.criteria_collection.get(
-                include=["documents", "metadatas"]
-            )
+            result = self.criteria_collection.get(include=["documents", "metadatas"])
             
             chunks = []
             if result['ids']:
@@ -366,7 +245,6 @@ class ChromaStore:
                         'content': result['documents'][i],
                         'metadata': result['metadatas'][i] if result.get('metadatas') else {}
                     })
-            
             return chunks
         except Exception as e:
             logger.error(f"Error getting criteria: {e}")
@@ -375,12 +253,7 @@ class ChromaStore:
     def get_all_report_chunks(self) -> List[Dict[str, Any]]:
         """Get all report chunks (for BM25 indexing)."""
         try:
-            result = self.report_collection.get(
-                include=["documents", "metadatas"]
-            )
-            
-            num_chunks = len(result['ids']) if result['ids'] else 0
-            print(f"[DEBUG ChromaStore] get_all_report_chunks: {num_chunks} chunks")
+            result = self.report_collection.get(include=["documents", "metadatas"])
             
             chunks = []
             if result['ids']:
@@ -390,43 +263,9 @@ class ChromaStore:
                         'content': result['documents'][i],
                         'metadata': result['metadatas'][i] if result.get('metadatas') else {}
                     })
-            
             return chunks
         except Exception as e:
-            print(f"[DEBUG ChromaStore] ERROR get_all_report_chunks: {e}")
             logger.error(f"Error getting report chunks: {e}")
-            return []
-    
-    def get_chunks_by_section(
-        self,
-        section_title: str,
-        collection_name: str = "report"
-    ) -> List[Dict[str, Any]]:
-        """Get all chunks from a specific section."""
-        collection = (
-            self.report_collection 
-            if collection_name == "report" 
-            else self.criteria_collection
-        )
-        
-        try:
-            result = collection.get(
-                where={"section_title": {"$eq": section_title}},
-                include=["documents", "metadatas"]
-            )
-            
-            chunks = []
-            if result['ids']:
-                for i in range(len(result['ids'])):
-                    chunks.append({
-                        'chunk_id': result['ids'][i],
-                        'content': result['documents'][i],
-                        'metadata': result['metadatas'][i] if result.get('metadatas') else {}
-                    })
-            
-            return chunks
-        except Exception as e:
-            logger.error(f"Error getting chunks by section: {e}")
             return []
     
     def clear_criteria(self):
@@ -435,11 +274,9 @@ class ChromaStore:
             existing = [c.name for c in self.client.list_collections()]
             if self.criteria_collection_name in existing:
                 self.client.delete_collection(self.criteria_collection_name)
-                print(f"[DEBUG ChromaStore] Deleted criteria collection")
                 logger.info("Criteria collection cleared")
             self._criteria_collection = None
         except Exception as e:
-            print(f"[DEBUG ChromaStore] Could not clear criteria: {e}")
             logger.warning(f"Could not clear criteria collection: {e}")
             self._criteria_collection = None
     
@@ -447,14 +284,11 @@ class ChromaStore:
         """Clear all report data."""
         try:
             existing = [c.name for c in self.client.list_collections()]
-            print(f"[DEBUG ChromaStore] clear_report: existing collections = {existing}")
             if self.report_collection_name in existing:
                 self.client.delete_collection(self.report_collection_name)
-                print(f"[DEBUG ChromaStore] Deleted report collection")
                 logger.info("Report collection cleared")
             self._report_collection = None
         except Exception as e:
-            print(f"[DEBUG ChromaStore] Could not clear report: {e}")
             logger.warning(f"Could not clear report collection: {e}")
             self._report_collection = None
     
@@ -468,40 +302,13 @@ class ChromaStore:
         try:
             criteria_count = self.criteria_collection.count()
             report_count = self.report_collection.count()
-        except Exception as e:
-            print(f"[DEBUG ChromaStore] Error getting stats: {e}")
+        except Exception:
             criteria_count = 0
             report_count = 0
         
-        stats = {
+        return {
             'criteria_count': criteria_count,
             'report_count': report_count,
             'persist_directory': str(self.persist_directory),
             'collections': [c.name for c in self.client.list_collections()]
         }
-        print(f"[DEBUG ChromaStore] get_stats: {stats}")
-        return stats
-    
-    def get_collection_metadata(self, collection_name: str = "report") -> Dict[str, Any]:
-        """Get metadata about a collection."""
-        collection = (
-            self.report_collection 
-            if collection_name == "report" 
-            else self.criteria_collection
-        )
-        
-        try:
-            count = collection.count()
-            sample = collection.peek(limit=1)
-            
-            return {
-                'name': collection.name,
-                'count': count,
-                'sample_metadata_keys': (
-                    list(sample['metadatas'][0].keys()) 
-                    if sample.get('metadatas') and sample['metadatas'] 
-                    else []
-                )
-            }
-        except Exception as e:
-            return {'error': str(e)}
