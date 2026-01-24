@@ -1,15 +1,9 @@
 """
 KSB Rubric Parser - Extracts structured KSB criteria from rubric tables.
-
-Parses markdown tables or text with KSB criteria including:
-- KSB code and description
-- Pass criteria (minimum acceptable)
-- Merit criteria (higher standard)
-- Referral criteria (not yet achieved)
 """
 import re
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import logging
 
 logger = logging.getLogger(__name__)
@@ -18,17 +12,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class KSBCriterion:
     """A single KSB criterion with grade descriptors."""
-    code: str  # e.g., "K1", "S16", "B5"
-    title: str  # e.g., "ML methodologies to meet business objectives"
-    full_description: str  # Combined code and title
-    
-    # Grade level criteria
-    pass_criteria: str  # What's needed for Pass
-    merit_criteria: str  # What's needed for Merit
-    referral_criteria: str  # What indicates Referral
-    
-    # Additional metadata
-    category: str = ""  # "Knowledge", "Skill", or "Behaviour"
+    code: str
+    title: str
+    full_description: str
+    pass_criteria: str
+    merit_criteria: str
+    referral_criteria: str
+    category: str = ""
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -55,17 +45,9 @@ REFERRAL Criteria (not yet achieved):
 {self.referral_criteria}"""
 
 
-class KSBRubricParser:
-    """
-    Parser for KSB rubric tables.
+class _KSBRubricParser:
+    """Internal parser for KSB rubric tables."""
     
-    Handles:
-    - Markdown table format
-    - Plain text format with KSB patterns
-    - Various table structures
-    """
-    
-    # Pattern to detect KSB codes
     KSB_PATTERN = re.compile(
         r'\*?\*?([KSB]\d{1,2})\*?\*?\s*[–-]\s*(.+?)(?:\*\*)?$',
         re.MULTILINE
@@ -79,15 +61,9 @@ class KSBRubricParser:
         }
     
     def parse_markdown_table(self, table_text: str) -> List[KSBCriterion]:
-        """
-        Parse a markdown table containing KSB rubric.
-        
-        Expected columns:
-        | KSB | Criteria to PASS | Criteria to MERIT | Criteria for REFERRAL |
-        """
+        """Parse a markdown table containing KSB rubric."""
         criteria = []
         
-        # Split into lines and find data rows (skip header and separator)
         lines = table_text.strip().split('\n')
         data_rows = []
         
@@ -96,10 +72,9 @@ class KSBRubricParser:
             if not line or line.startswith('|--') or line.startswith('| --'):
                 continue
             if '|' in line:
-                # Check if it's a header row
                 line_lower = line.lower()
                 if 'ksb' in line_lower and ('pass' in line_lower or 'merit' in line_lower):
-                    continue  # Skip header
+                    continue
                 data_rows.append(line)
         
         for row in data_rows:
@@ -112,33 +87,27 @@ class KSBRubricParser:
     
     def _parse_table_row(self, row: str) -> Optional[KSBCriterion]:
         """Parse a single table row into a KSBCriterion."""
-        # Split by | and clean up
         cells = [cell.strip() for cell in row.split('|')]
-        cells = [c for c in cells if c]  # Remove empty cells
+        cells = [c for c in cells if c]
         
         if len(cells) < 4:
             return None
         
-        # First cell should contain KSB code and description
         ksb_cell = cells[0]
         
-        # Extract KSB code (K1, S16, B5, etc.)
         code_match = re.search(r'\*?\*?([KSB]\d{1,2})\*?\*?', ksb_cell)
         if not code_match:
             return None
         
         code = code_match.group(1)
         
-        # Extract title (everything after the code and dash)
         title_match = re.search(r'[KSB]\d{1,2}\*?\*?\s*[–-]\s*(.+)', ksb_cell)
         title = title_match.group(1).strip().strip('*') if title_match else ksb_cell
         
-        # Get criteria for each level
         pass_criteria = cells[1] if len(cells) > 1 else ""
         merit_criteria = cells[2] if len(cells) > 2 else ""
         referral_criteria = cells[3] if len(cells) > 3 else ""
         
-        # Determine category
         category = self.ksb_categories.get(code[0], "Unknown")
         
         return KSBCriterion(
@@ -150,108 +119,10 @@ class KSBRubricParser:
             referral_criteria=referral_criteria,
             category=category
         )
-    
-    def parse_text(self, text: str) -> List[KSBCriterion]:
-        """
-        Parse KSB criteria from general text format.
-        
-        Tries to identify KSB codes and associated criteria.
-        """
-        # First try to find markdown table
-        if '|' in text and ('PASS' in text.upper() or 'MERIT' in text.upper()):
-            return self.parse_markdown_table(text)
-        
-        # Otherwise try to extract from structured text
-        criteria = []
-        
-        # Find all KSB references
-        ksb_matches = list(self.KSB_PATTERN.finditer(text))
-        
-        for i, match in enumerate(ksb_matches):
-            code = match.group(1)
-            title = match.group(2).strip()
-            
-            # Get text until next KSB or end
-            start_pos = match.end()
-            end_pos = ksb_matches[i + 1].start() if i + 1 < len(ksb_matches) else len(text)
-            content = text[start_pos:end_pos].strip()
-            
-            # Try to extract Pass/Merit/Referral sections
-            pass_criteria = self._extract_grade_section(content, 'pass')
-            merit_criteria = self._extract_grade_section(content, 'merit')
-            referral_criteria = self._extract_grade_section(content, 'referral')
-            
-            # If no grade sections found, use the whole content as general criteria
-            if not any([pass_criteria, merit_criteria, referral_criteria]):
-                pass_criteria = content[:500] if content else "See assignment brief"
-            
-            category = self.ksb_categories.get(code[0], "Unknown")
-            
-            criteria.append(KSBCriterion(
-                code=code,
-                title=title,
-                full_description=f"{code} – {title}",
-                pass_criteria=pass_criteria or "Meets basic requirements",
-                merit_criteria=merit_criteria or "Exceeds basic requirements with strong evidence",
-                referral_criteria=referral_criteria or "Does not meet minimum requirements",
-                category=category
-            ))
-        
-        return criteria
-    
-    def _extract_grade_section(self, text: str, grade: str) -> str:
-        """Extract criteria text for a specific grade level."""
-        patterns = {
-            'pass': [
-                r'pass[:\s]+(.+?)(?=merit|referral|$)',
-                r'minimum[:\s]+(.+?)(?=merit|strong|higher|$)',
-                r'basic[:\s]+(.+?)(?=merit|strong|$)'
-            ],
-            'merit': [
-                r'merit[:\s]+(.+?)(?=referral|pass|$)',
-                r'strong[:\s]+(.+?)(?=referral|not yet|$)',
-                r'higher[:\s]+(.+?)(?=referral|$)'
-            ],
-            'referral': [
-                r'referral[:\s]+(.+?)(?=pass|merit|$)',
-                r'not yet[:\s]+(.+?)(?=pass|merit|$)',
-                r'fail[:\s]+(.+?)(?=pass|merit|$)'
-            ]
-        }
-        
-        for pattern in patterns.get(grade, []):
-            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
-            if match:
-                return match.group(1).strip()[:500]
-        
-        return ""
-    
-    def get_ksb_by_code(
-        self, 
-        criteria: List[KSBCriterion], 
-        code: str
-    ) -> Optional[KSBCriterion]:
-        """Get a specific KSB criterion by its code."""
-        for c in criteria:
-            if c.code.upper() == code.upper():
-                return c
-        return None
-    
-    def get_ksbs_by_category(
-        self, 
-        criteria: List[KSBCriterion], 
-        category: str
-    ) -> List[KSBCriterion]:
-        """Get all KSBs of a specific category (Knowledge, Skill, Behaviour)."""
-        return [c for c in criteria if c.category.lower() == category.lower()]
 
 
-# =============================================================================
-# MODULE RUBRICS
-# =============================================================================
-
-# MLCC Module 3 - Machine Learning with Cloud Computing
-DEFAULT_MLCC_RUBRIC = """
+# Module rubrics
+_MLCC_RUBRIC = """
 | KSB | Criteria to PASS | Criteria to MERIT | Criteria for REFERRAL |
 | --- | --- | --- | --- |
 | **K1 – ML methodologies to meet business objectives** | States a clear business problem and identifies an appropriate ML approach (e.g., supervised learning). Describes why the approach fits the objective at a basic level. | Strong problem framing and justification of methodology choices (e.g., why NN vs baseline). Includes alternatives considered and a reasoned selection tied to business outcomes. | ML approach is unclear or mismatched to objective. Little/no link between model choice and business need. |
@@ -267,15 +138,7 @@ DEFAULT_MLCC_RUBRIC = """
 | **B5 – Continuous professional development (CPD)** | Identifies learning undertaken and at least one concrete next step for development based on the project. | Strong CPD: specific evidence of learning (courses, docs, experimentation), reflective improvement loop, and a credible plan tied to role/org needs. | No CPD evidence, or vague statements with no concrete learning actions or reflection. |
 """
 
-
-def get_default_ksb_criteria() -> List[KSBCriterion]:
-    """Get the default KSB criteria for MLCC Module 3."""
-    parser = KSBRubricParser()
-    return parser.parse_markdown_table(DEFAULT_MLCC_RUBRIC)
-
-
-# AIDI Module - AI-Driven Innovation / Data Products
-DEFAULT_AIDI_RUBRIC = """
+_AIDI_RUBRIC = """
 | KSB | Criteria to PASS | Criteria to MERIT | Criteria for REFERRAL |
 | --- | --- | --- | --- |
 | **K1 – AI/ML methodologies to meet business objectives** | Identifies a valid AI/ML method for the product/artefact and links it to the business objective at a basic level. | Justifies methodology choices vs alternatives (incl. constraints) and links to measurable business value. | Method choice is unclear/mismatched; weak link to business objective. |
@@ -299,9 +162,7 @@ DEFAULT_AIDI_RUBRIC = """
 | **B8 – Awareness of trends/innovation; uses literature and sources** | Uses some relevant references (academic/industry) and links them to the project. | Strong, current literature + trend awareness; synthesises sources into decisions and business value. | Little/no referencing; weak understanding of innovation landscape. |
 """
 
-
-# DSP Module - Data Science Principles
-DEFAULT_DSP_RUBRIC = """
+_DSP_RUBRIC = """
 | KSB | Criteria to PASS | Criteria to MERIT | Criteria for REFERRAL |
 | --- | --- | --- | --- |
 | **K2 – Modern storage/processing/ML methods to maximise organisational impact** | Describes an infrastructure approach and explains, at a basic level, how storage/processing enables analysis and value. Mentions how the organisation would benefit. | Clear trade-offs (cost, scale, governance, latency), realistic technology choices, and strong linkage from infrastructure → insights → business impact. Mentions future ML enablement sensibly. | Infrastructure and impact link is unclear or incorrect; no credible justification of technologies or benefits. |
@@ -325,16 +186,11 @@ DEFAULT_DSP_RUBRIC = """
 | **B7 – Shares best practice in org/community (AI & DS)** | Reflects on learning and states at least one way to share best practice (documentation, show-and-tell, template). | Concrete dissemination plan: reusable assets (dashboard standards, QA checks), stakeholder enablement, community contribution. | No meaningful reflection or sharing; vague statements only. |
 """
 
-
-# =============================================================================
-# MODULE DEFINITIONS
-# =============================================================================
-
 AVAILABLE_MODULES = {
     'DSP': {
         'name': 'DSP - Data Science Principles',
         'description': 'Data Science fundamentals: EDA, hypothesis testing, visualisation, and statistical reasoning',
-        'rubric': DEFAULT_DSP_RUBRIC,
+        'rubric': _DSP_RUBRIC,
         'ksb_count': 19,
         'ksbs': ['K2', 'K5', 'K15', 'K20', 'K22', 'K24', 'K26', 'K27',
                  'S1', 'S9', 'S10', 'S13', 'S17', 'S18', 'S21', 'S22', 'S26',
@@ -343,14 +199,14 @@ AVAILABLE_MODULES = {
     'MLCC': {
         'name': 'MLCC - Machine Learning on Cloud Computing',
         'description': 'End-to-end ML system on public cloud with performance benchmarking',
-        'rubric': DEFAULT_MLCC_RUBRIC,
+        'rubric': _MLCC_RUBRIC,
         'ksb_count': 11,
         'ksbs': ['K1', 'K2', 'K16', 'K18', 'K19', 'K25', 'S15', 'S16', 'S19', 'S23', 'B5']
     },
     'AIDI': {
         'name': 'AIDI - AI & Digital Innovation',
         'description': 'AI/Data Products module focusing on business value, ethics, and stakeholder management',
-        'rubric': DEFAULT_AIDI_RUBRIC,
+        'rubric': _AIDI_RUBRIC,
         'ksb_count': 19,
         'ksbs': ['K1', 'K4', 'K5', 'K6', 'K8', 'K9', 'K11', 'K12', 'K21', 'K24', 'K29', 
                  'S3', 'S5', 'S6', 'S25', 'S26', 'B3', 'B4', 'B8']
@@ -359,19 +215,11 @@ AVAILABLE_MODULES = {
 
 
 def get_module_criteria(module_code: str) -> List[KSBCriterion]:
-    """
-    Get KSB criteria for a specific module.
-    
-    Args:
-        module_code: 'DSP', 'MLCC', or 'AIDI'
-        
-    Returns:
-        List of KSBCriterion for the module
-    """
+    """Get KSB criteria for a specific module."""
     if module_code not in AVAILABLE_MODULES:
         raise ValueError(f"Unknown module: {module_code}. Available: {list(AVAILABLE_MODULES.keys())}")
     
-    parser = KSBRubricParser()
+    parser = _KSBRubricParser()
     rubric = AVAILABLE_MODULES[module_code]['rubric']
     return parser.parse_markdown_table(rubric)
 
@@ -379,18 +227,3 @@ def get_module_criteria(module_code: str) -> List[KSBCriterion]:
 def get_available_modules() -> dict:
     """Get dictionary of available modules and their metadata."""
     return AVAILABLE_MODULES
-
-
-def get_dsp_criteria() -> List[KSBCriterion]:
-    """Get KSB criteria for DSP module."""
-    return get_module_criteria('DSP')
-
-
-def get_mlcc_criteria() -> List[KSBCriterion]:
-    """Get KSB criteria for MLCC module."""
-    return get_module_criteria('MLCC')
-
-
-def get_aidi_criteria() -> List[KSBCriterion]:
-    """Get KSB criteria for AIDI module."""
-    return get_module_criteria('AIDI')

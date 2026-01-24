@@ -1,35 +1,55 @@
-﻿# KSB Coursework Marker
+﻿# Page Citation Fix
 
-AI-powered coursework assessment tool that evaluates student work against Knowledge, Skills, and Behaviours (KSB) criteria with Pass/Merit/Referral grading.
+## The Problem
 
-## Features
+1. **DOCX files showed wrong page count**: 11 actual pages → 7 estimated
+2. **LLM cited incorrect page numbers**: Because estimates were wrong, citations were wrong
 
-- **Multi-module support:** MLCC, AIDI, DPS
-- **KSB-based evaluation** with structured rubrics
-- **RAG retrieval** for evidence-based assessment
-- **Local LLM** via Ollama (Gemma 3 4B)
-- **Export** assessments as Markdown
+## Root Cause
 
-## Setup
-`ash
-# Create virtual environment
-python -m venv coursework-env
-coursework-env\Scripts\Activate.ps1
+DOCX files don't have real page numbers (they're flow documents). The old code used character count (~2500 chars/page) to estimate, which was inaccurate.
 
-# Install dependencies
-pip install -r requirements.txt
+## The Fix
 
-# Pull Ollama model
-ollama pull gemma3:4b
+**For DOCX files**: Don't show page numbers at all - use ONLY section numbers for citations
+**For PDF files**: Show accurate page numbers (PDF has real pages)
 
-# Run
-streamlit run ui/ksb_app.py
-`
+## Files to Replace
 
-## Modules
+| File | What Changed |
+|------|--------------|
+| `src/document_processing/docx_processor.py` | Added `pages_are_accurate=False` flag, reduced CHARS_PER_PAGE to 1800 |
+| `src/document_processing/pdf_processor.py` | Added `pages_are_accurate=True` flag |
+| `src/retrieval/retriever.py` | `format_context_for_llm()` now hides page numbers for DOCX |
+| `src/prompts/ksb_templates.py` | Updated citation rules: section-based for DOCX, page+section for PDF |
+| `ui/ksb_app.py` | Tracks `pages_are_accurate`, shows warning in UI for DOCX estimates |
 
-| Module | KSBs | Focus |
-|--------|------|-------|
-| MLCC | 11 | Cloud ML, performance benchmarking |
-| AIDI | 19 | Business value, ethics, stakeholders |
-| DPS | 19 | EDA, hypothesis testing, visualisation |
+## How It Works Now
+
+### For DOCX (pages_are_accurate=False):
+- UI shows: `Pages (est.): ~7` with warning
+- Evidence headers: `(Section 3)` - no page numbers
+- Prompt tells LLM: "Do NOT cite page numbers - they are not available"
+
+### For PDF (pages_are_accurate=True):
+- UI shows: `Pages: 11` - accurate
+- Evidence headers: `(Section 3 / page 7)` - both shown
+- Prompt tells LLM: "Cite using Section AND page numbers"
+
+## Installation
+
+Replace these 5 files in your project:
+```
+src/document_processing/docx_processor.py
+src/document_processing/pdf_processor.py
+src/retrieval/retriever.py
+src/prompts/ksb_templates.py
+ui/ksb_app.py
+```
+
+## Expected Results
+
+After this fix:
+- LLM will cite by section only for DOCX files (e.g., "Section 3", "Section 5")
+- LLM will cite by section AND page for PDF files (e.g., "Section 3, page 7")
+- No more incorrect page citations for DOCX documents
