@@ -1,5 +1,5 @@
 """
-Smart Chunker - Structure-aware document chunking.
+Smart Chunker - FIXED VERSION with better section detection and more granular chunks.
 """
 import re
 from typing import List, Dict, Any, Optional
@@ -62,16 +62,17 @@ class TextChunk:
 
 
 class SmartChunker:
-    """Smart document chunker with section awareness."""
+    """Smart document chunker with improved section awareness."""
     
+    # FIXED: Reduced chunk sizes to create more chunks with better granularity
     def __init__(
         self,
-        criteria_chunk_size: int = 400,
+        criteria_chunk_size: int = 300,  # Reduced from 400
         criteria_overlap: int = 50,
-        report_chunk_size: int = 600,
-        report_overlap: int = 120,
-        min_chunk_size: int = 100,
-        max_chunk_size: int = 1000,
+        report_chunk_size: int = 400,    # Reduced from 600
+        report_overlap: int = 80,        # Reduced from 120
+        min_chunk_size: int = 50,        # Reduced from 100
+        max_chunk_size: int = 600,       # Reduced from 1000
         encoding_name: str = "cl100k_base"
     ):
         self.criteria_chunk_size = criteria_chunk_size
@@ -118,6 +119,56 @@ class SmartChunker:
         
         sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
         return [word for word, _ in sorted_words[:max_keywords]]
+    
+    def _detect_section_from_content(self, text: str) -> tuple:
+        """
+        FIXED: Detect section headers from content even without proper styles.
+        
+        Returns: (is_heading, section_number, heading_level)
+        """
+        text_stripped = text.strip()
+        
+        # Pattern 1: "Part X - Title" or "Part X: Title"
+        part_match = re.match(r'^Part\s+(\d+)\s*[-:–]\s*(.+)$', text_stripped, re.IGNORECASE)
+        if part_match:
+            return True, part_match.group(1), 1
+        
+        # Pattern 2: "Section X - Title" or "Section X: Title"
+        section_match = re.match(r'^Section\s+(\d+)\s*[-:–]\s*(.+)$', text_stripped, re.IGNORECASE)
+        if section_match:
+            return True, section_match.group(1), 1
+        
+        # Pattern 3: "1. Title" or "1.2 Title" or "1.2.3 Title"
+        numbered_match = re.match(r'^(\d+(?:\.\d+)*)\.\s*([A-Z].+)$', text_stripped)
+        if numbered_match:
+            number = numbered_match.group(1)
+            level = number.count('.') + 1
+            return True, number, level
+        
+        # Pattern 4: "1 Title" (number followed by capitalized word)
+        simple_numbered = re.match(r'^(\d+)\s+([A-Z][a-z]+(?:\s+[a-z]+)*)', text_stripped)
+        if simple_numbered and len(text_stripped) < 80:
+            return True, simple_numbered.group(1), 2
+        
+        # Pattern 5: Title case short lines (likely headings)
+        if len(text_stripped) < 60 and text_stripped.istitle():
+            words = text_stripped.split()
+            # Exclude if it's a sentence (ends with period or contains common sentence words)
+            if not text_stripped.endswith('.') and len(words) <= 8:
+                return True, None, 2
+        
+        # Pattern 6: Common section titles
+        common_headings = [
+            'executive summary', 'introduction', 'conclusion', 'methodology',
+            'requirements', 'results', 'discussion', 'references', 'appendix',
+            'technical feasibility', 'proof of concept', 'benchmarking',
+            'functional requirements', 'non-functional requirements',
+            'data pipeline', 'model training', 'evaluation', 'deployment'
+        ]
+        if text_stripped.lower() in common_headings:
+            return True, None, 2
+        
+        return False, None, None
     
     def find_best_split_point(self, text: str, target_pos: int, window: int = 200) -> int:
         """Find the best position to split text near target_pos."""
@@ -175,6 +226,11 @@ class SmartChunker:
             content = chunk.content if hasattr(chunk, 'content') else str(chunk)
             page = getattr(chunk, 'page_estimate', 1) or getattr(chunk, 'page_number', 1)
             chunk_type = getattr(chunk, 'chunk_type', 'text')
+            
+            # FIXED: Also detect sections from content
+            is_heading, section_num, heading_level = self._detect_section_from_content(content)
+            if is_heading and heading_level and heading_level <= 2:
+                parent_section = content[:100]
             
             if chunk_type == 'heading':
                 heading_level = getattr(chunk, 'heading_level', 1)
@@ -278,7 +334,10 @@ class SmartChunker:
         return result_chunks
     
     def chunk_report(self, chunks: List[Any], document_id: str = "report") -> List[TextChunk]:
-        """Chunk a student report with semantic boundary awareness."""
+        """
+        FIXED: Chunk a student report with better semantic boundary awareness.
+        Creates more granular chunks to preserve document structure.
+        """
         result_chunks = []
         chunk_counter = 0
         
@@ -301,6 +360,18 @@ class SmartChunker:
             has_fig = getattr(chunk, 'has_figure_reference', False)
             section_num = getattr(chunk, 'section_number', None)
             
+            # FIXED: Detect sections from content if not already a heading
+            is_content_heading = False
+            content_section_num = None
+            content_heading_level = None
+            
+            if chunk_type != 'heading':
+                is_content_heading, content_section_num, content_heading_level = self._detect_section_from_content(content)
+                if is_content_heading:
+                    chunk_type = 'heading'
+                    heading_level = content_heading_level
+                    section_num = content_section_num
+            
             content_tokens = self.count_tokens(content)
             
             if figure_ids:
@@ -313,11 +384,15 @@ class SmartChunker:
             
             should_split = False
             
+            # FIXED: More aggressive splitting for better granularity
             if current_tokens + content_tokens > self.report_chunk_size:
                 should_split = True
-            elif is_heading and heading_level and heading_level <= 2 and current_content:
+            elif is_heading and current_content:  # Split on ANY heading
                 should_split = True
             elif current_tokens + content_tokens > self.max_chunk_size:
+                should_split = True
+            # FIXED: Also split on paragraph breaks if chunk is getting long
+            elif current_tokens > self.report_chunk_size * 0.7 and content.startswith('\n'):
                 should_split = True
             
             if should_split and current_content:
@@ -341,6 +416,7 @@ class SmartChunker:
                 ))
                 chunk_counter += 1
                 
+                # FIXED: Smaller overlap to create more distinct chunks
                 overlap_content = []
                 overlap_tokens = 0
                 
@@ -391,7 +467,7 @@ class SmartChunker:
                 chunk_index=chunk_counter
             ))
         
-        logger.info(f"Created {len(result_chunks)} report chunks")
+        logger.info(f"Created {len(result_chunks)} report chunks (FIXED chunker)")
         return result_chunks
     
     def get_chunking_stats(self, chunks: List[TextChunk]) -> Dict[str, Any]:
@@ -409,5 +485,6 @@ class SmartChunker:
             'max_tokens': max(token_counts),
             'chunks_with_figures': sum(1 for c in chunks if c.has_figure_reference),
             'chunks_with_keywords': sum(1 for c in chunks if c.keywords),
+            'chunks_with_sections': sum(1 for c in chunks if c.section_title),
             'document_type': chunks[0].document_type if chunks else None
         }

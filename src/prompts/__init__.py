@@ -1,5 +1,5 @@
 """
-Prompts Module - KSB evaluation prompt templates.
+Prompts Module - KSB evaluation prompt templates with brief context support.
 """
 from .ksb_templates import KSBPromptTemplates, extract_grade_from_evaluation
 
