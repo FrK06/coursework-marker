@@ -1,12 +1,6 @@
 """
-Retrieval Module - Advanced hybrid search with query expansion.
-
-Features:
-- Hybrid search (BM25 + semantic)
-- Multi-query expansion
-- Reciprocal Rank Fusion
-- Section-aware retrieval
+Retrieval Module - Hybrid search with query expansion.
 """
-from .retriever import Retriever, RetrievalResult, RetrievalContext, BM25, QueryExpander
+from .retriever import Retriever, RetrievalResult
 
-__all__ = ["Retriever", "RetrievalResult", "RetrievalContext", "BM25", "QueryExpander"]
+__all__ = ["Retriever", "RetrievalResult"]

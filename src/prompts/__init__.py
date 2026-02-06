@@ -1,6 +1,6 @@
 """
-Prompts Module - Carefully designed prompt templates for academic marking.
+Prompts Module - KSB evaluation prompt templates with brief context support.
 """
-from .templates import PromptTemplates
+from .ksb_templates import KSBPromptTemplates, extract_grade_from_evaluation
 
-__all__ = ["PromptTemplates"]
+__all__ = ["KSBPromptTemplates", "extract_grade_from_evaluation"]

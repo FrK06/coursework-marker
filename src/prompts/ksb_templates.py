@@ -1,193 +1,328 @@
 """
-KSB Evaluation Prompts - Prompts for assessing work against KSB criteria.
+KSB Evaluation Prompts V2 - With Assignment Brief Context Integration.
 
-Design Principles:
-1. GROUNDING: Always cite evidence from provided context
-2. GRADE ALIGNMENT: Evaluate against Pass/Merit/Referral descriptors
-3. HONEST: Admit when evidence is missing or insufficient
-4. CONSTRUCTIVE: Focus on how to improve
-5. STRUCTURED: Consistent output format
+This version includes the assignment brief tasks in the evaluation context,
+giving the LLM clear understanding of what the student was asked to do.
 """
+import re
+import json
+from typing import Dict, Any, Optional, List
 
 
 class KSBPromptTemplates:
-    """
-    Prompt templates for KSB-based coursework evaluation.
+    """Prompt templates for KSB-based coursework evaluation with brief context."""
     
-    Evaluates student work against:
-    - Pass criteria (minimum acceptable)
-    - Merit criteria (higher standard)
-    - Referral criteria (not yet achieved)
-    """
-    
-    # ==========================================================================
-    # SYSTEM PROMPT FOR KSB EVALUATION
-    # ==========================================================================
-    
-    SYSTEM_PROMPT_KSB_MARKER = """You are an experienced academic assessor evaluating apprenticeship coursework against Knowledge, Skills, and Behaviours (KSB) criteria.
+    SYSTEM_PROMPT_KSB_MARKER = """You are an academic assessor evaluating apprenticeship coursework against KSB criteria.
 
-Your role is to:
-1. EVALUATE work against specific KSB criteria with Pass/Merit/Referral grade descriptors
-2. CITE specific evidence from the student's submission
-3. RECOMMEND a grade level (Pass, Merit, or Referral) with clear justification
-4. IDENTIFY what's needed to improve to the next level
-5. MAINTAIN a supportive, constructive tone
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    ⚠️  CRITICAL RULES - MUST FOLLOW  ⚠️                       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
-CRITICAL RULES:
+1. ONLY USE PROVIDED EVIDENCE
+   - You may ONLY cite text that appears in the "EVIDENCE FROM SUBMISSION" section
+   - You have the ASSIGNMENT BRIEF showing what the student was asked to do
+   - If evidence is missing → write "NOT FOUND" 
+   - NEVER invent quotes, section numbers, page numbers, or content
+   
+2. ZERO FABRICATION POLICY
+   ❌ NEVER invent company names, product names, or technical details
+   ❌ NEVER create fictional scenarios or examples not in the evidence
+   ❌ NEVER add information from your training data
+   ❌ NEVER assume what the student "might have meant"
+   
+3. BRIEF-AWARE EVALUATION
+   - The ASSIGNMENT BRIEF tells you WHAT the student should have done
+   - The KSB CRITERIA tells you HOW to evaluate it
+   - The EVIDENCE shows you WHAT the student actually did
+   - Compare EVIDENCE against both BRIEF requirements and KSB criteria
+   
+4. EVIDENCE-FIRST ASSESSMENT
+   - List ALL evidence BEFORE making any judgement
+   - Every claim must have a citation [E1], [E2], etc.
+   - If no evidence exists → grade as REFERRAL with confidence LOW
+   
+5. CITE BY SECTION (not page)
+   - Use section numbers as primary reference (e.g., "Section 3")
+   - Only cite sections shown in the evidence headers
 
-EVIDENCE-BASED GRADING:
-- Base your grade recommendation ONLY on evidence present in the submission
-- Quote specific text to support your assessment
-- If evidence is strong, acknowledge it - don't understate good work
-- If evidence is missing, clearly state what's absent
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                           GRADING SCALE                                       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
-GRADE LEVEL DETERMINATION:
-- REFERRAL: Does not meet minimum Pass criteria; significant gaps or errors
-- PASS: Meets the basic requirements described in Pass criteria
-- MERIT: Exceeds Pass and demonstrates the qualities in Merit criteria
+- REFERRAL: Pass criteria NOT met (significant gaps, missing evidence)
+- PASS: Pass criteria met (basic requirements satisfied)  
+- MERIT: Pass criteria met AND Merit criteria substantially met
 
-ACCURACY REQUIREMENTS:
-- DO NOT claim something is missing if it exists in the evidence
-- DO NOT recommend Referral if Pass criteria are clearly met
-- ACKNOWLEDGE methodology/planning even if results are TBD
-- USE ONLY the page/section numbers provided in the evidence
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        IMAGE/FIGURE ANALYSIS                                  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
-CITATION ACCURACY:
-- ONLY use page numbers and section numbers explicitly provided
-- DO NOT invent section numbers like "2.1", "3.3" - use actual references
-- Format citations as "(page X / Section Y)"
+When images are provided:
+- Examine charts and graphs for data presentation quality
+- Check architecture diagrams for system design understanding
+- Reference specific figures as evidence (e.g., "Figure 1 shows...")
 
-Your feedback should help the student understand their current level and exactly what's needed to achieve a higher grade."""
+OUTPUT FORMAT: You MUST include a JSON block with your grade decision."""
 
-    # ==========================================================================
-    # KSB EVALUATION PROMPT
-    # ==========================================================================
-    
-    KSB_EVALUATION_PROMPT = """Evaluate the student's work against this specific KSB criterion.
+    # New template with brief context
+    KSB_EVALUATION_WITH_BRIEF_PROMPT = """Evaluate this student's work against the KSB criterion below.
 
-<ksb_criterion>
-KSB Code: {ksb_code}
-KSB Title: {ksb_title}
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    ⚠️  ANTI-HALLUCINATION REMINDER  ⚠️                        ║
+║                                                                               ║
+║  • ONLY use text from the EVIDENCE section below                             ║
+║  • The ASSIGNMENT BRIEF shows what was required                              ║
+║  • If you cannot find evidence → write "NOT FOUND"                           ║
+║  • NEVER invent quotes, company names, or technical details                  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
-PASS Criteria (minimum acceptable):
-{pass_criteria}
+## ASSIGNMENT BRIEF CONTEXT
 
-MERIT Criteria (strong/higher standard):
-{merit_criteria}
+**What the student was asked to do for this KSB:**
 
-REFERRAL Criteria (not yet achieved):
-{referral_criteria}
-</ksb_criterion>
-
-<evidence_from_submission>
-{evidence_text}
-</evidence_from_submission>
-
-Provide your evaluation in the following structure:
-
-## Evidence Found
-
-List ALL relevant evidence from the submission. Be thorough - search for content related to this KSB across all provided evidence.
-
-Format:
-- "[Quote or paraphrase]" (page X / Section Y)
-- "[Quote or paraphrase]" (page X / Section Y)
-
-If no relevant evidence found: "No direct evidence found for this KSB."
-
-## Assessment Against Grade Criteria
-
-### Pass Criteria Assessment
-For each element of the Pass criteria, state whether it is:
-✅ MET - [brief evidence reference]
-⚠️ PARTIALLY MET - [what's present vs missing]
-❌ NOT MET - [what's missing]
-
-### Merit Criteria Assessment  
-For each element of the Merit criteria, state whether it is:
-✅ MET - [brief evidence reference]
-⚠️ PARTIALLY MET - [what's present vs missing]
-❌ NOT MET - [what would be needed]
-
-## Recommended Grade: [PASS / MERIT / REFERRAL]
-
-**Justification:** [2-3 sentences explaining why this grade level, referencing the criteria above]
-
-## Strengths for this KSB
-- [Strength 1 with evidence reference]
-- [Strength 2 with evidence reference]
-
-## To Achieve Higher Grade
-[If Referral: What's needed for Pass]
-[If Pass: What's needed for Merit]
-[If Merit: What would make this exceptional]
-
-Specific actions:
-1. [Concrete action to improve]
-2. [Concrete action to improve]
+{brief_context}
 
 ---
 
-IMPORTANT: 
-- Base your grade ONLY on the evidence provided
-- If Pass criteria are met, do NOT recommend Referral
-- If work shows planning/methodology but results are TBD, assess the planning quality
-- Use only the citation references provided in the evidence"""
+## KSB CRITERION
 
-    # ==========================================================================
-    # OVERALL KSB SUMMARY PROMPT
-    # ==========================================================================
-    
-    KSB_OVERALL_SUMMARY_PROMPT = """Based on the KSB-by-KSB evaluations below, provide an overall assessment of this coursework submission.
+**{ksb_code}: {ksb_title}**
 
-<ksb_evaluations>
+| Grade | Criteria |
+|-------|----------|
+| PASS | {pass_criteria} |
+| MERIT | {merit_criteria} |
+| REFERRAL | {referral_criteria} |
+
+---
+
+## EVIDENCE FROM SUBMISSION (USE ONLY THIS - DO NOT INVENT)
+
+{evidence_text}
+{image_context}
+
+════════════════════════════════════════════════════════════════════════════════
+
+## YOUR TASK
+
+Follow these steps IN ORDER:
+
+### STEP 1: BRIEF REQUIREMENTS CHECK
+
+Based on the Assignment Brief above, list what the student should have demonstrated:
+- [ ] Requirement 1 from brief
+- [ ] Requirement 2 from brief
+- [ ] etc.
+
+### STEP 2: LIST EVIDENCE FOUND
+
+Search the evidence above and list ALL relevant content:
+
+**Evidence Found:**
+- [E1] "exact quote from evidence" (Section X) - addresses [requirement]
+- [E2] "exact quote from evidence" (Section Y) - addresses [requirement]
+- [E3] Figure/Chart: [describe what it shows] - addresses [requirement]
+
+⚠️ RULES:
+- Only quote TEXT that appears VERBATIM in the evidence
+- Link each evidence item to a brief requirement or KSB criterion
+- If no relevant evidence exists, write: **Evidence Found:** NONE
+
+### STEP 3: ASSESS PASS CRITERIA
+
+| Pass Requirement | Brief Requirement | Status | Evidence |
+|------------------|-------------------|--------|----------|
+| [from KSB rubric] | [from assignment brief] | ✅ MET / ❌ NOT MET | [E1] or "NOT FOUND" |
+
+### STEP 4: ASSESS MERIT CRITERIA (only if Pass is met)
+
+| Merit Requirement | Status | Evidence |
+|-------------------|--------|----------|
+| [requirement] | ✅ MET / ❌ NOT MET | [Ex] or "NOT FOUND" |
+
+### STEP 5: GRADE DECISION
+
+```json
+{{
+  "ksb_code": "{ksb_code}",
+  "grade": "PASS|MERIT|REFERRAL",
+  "confidence": "HIGH|MEDIUM|LOW",
+  "pass_criteria_met": true|false,
+  "merit_criteria_met": true|false,
+  "brief_requirements_met": ["list", "of", "met", "requirements"],
+  "brief_requirements_missing": ["list", "of", "missing"],
+  "key_evidence": ["E1", "E2"],
+  "main_gap": "description or null"
+}}
+```
+
+### STEP 6: BRIEF JUSTIFICATION
+
+2-3 sentences explaining:
+1. How the student addressed the assignment brief requirements
+2. How this maps to the KSB criteria
+3. What grade this warrants and why
+
+### STEP 7: SPECIFIC IMPROVEMENTS
+
+List 2-3 specific actions referencing the assignment brief:
+- "To address Task X requirement Y, the student should..."
+- "The brief asked for Z but the submission only shows..."
+
+════════════════════════════════════════════════════════════════════════════════
+
+⚠️ FINAL REMINDER: 
+- Compare against BOTH the assignment brief AND the KSB criteria
+- If evidence is missing, grade as REFERRAL with confidence LOW
+- NEVER invent content - this is academic assessment requiring accuracy"""
+
+    # Fallback template without brief (for backward compatibility)
+    KSB_EVALUATION_PROMPT = """Evaluate this student's work against the KSB criterion below.
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    ⚠️  ANTI-HALLUCINATION REMINDER  ⚠️                        ║
+║                                                                               ║
+║  • ONLY use text from the EVIDENCE section below                             ║
+║  • If you cannot find evidence → write "NOT FOUND"                           ║
+║  • NEVER invent quotes, company names, or technical details                  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+## KSB CRITERION
+
+**{ksb_code}: {ksb_title}**
+
+| Grade | Criteria |
+|-------|----------|
+| PASS | {pass_criteria} |
+| MERIT | {merit_criteria} |
+| REFERRAL | {referral_criteria} |
+
+## EVIDENCE FROM SUBMISSION (USE ONLY THIS - DO NOT INVENT)
+
+{evidence_text}
+{image_context}
+
+---
+
+## YOUR TASK
+
+### STEP 1: LIST EVIDENCE
+
+**Evidence Found:**
+- [E1] "exact quote from evidence" (Section X) 
+- [E2] "exact quote from evidence" (Section Y)
+
+If no relevant evidence exists, write: **Evidence Found:** NONE
+
+### STEP 2: ASSESS PASS CRITERIA
+
+| Pass Requirement | Status | Evidence |
+|------------------|--------|----------|
+| [requirement] | ✅ MET / ❌ NOT MET | [E1] or "NOT FOUND" |
+
+### STEP 3: ASSESS MERIT CRITERIA (only if Pass is met)
+
+| Merit Requirement | Status | Evidence |
+|-------------------|--------|----------|
+| [requirement] | ✅ MET / ❌ NOT MET | [Ex] or "NOT FOUND" |
+
+### STEP 4: GRADE DECISION
+
+```json
+{{
+  "ksb_code": "{ksb_code}",
+  "grade": "PASS|MERIT|REFERRAL",
+  "confidence": "HIGH|MEDIUM|LOW",
+  "pass_criteria_met": true|false,
+  "merit_criteria_met": true|false,
+  "key_evidence": ["E1", "E2"],
+  "main_gap": "description or null"
+}}
+```
+
+### STEP 5: JUSTIFICATION
+
+2-3 sentences explaining your grade decision.
+
+### STEP 6: IMPROVEMENTS
+
+List 2-3 specific actions to improve."""
+
+    KSB_OVERALL_SUMMARY_PROMPT = """Summarize the KSB evaluations below into an overall assessment.
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    ⚠️  ANTI-HALLUCINATION REMINDER  ⚠️                        ║
+║                                                                               ║
+║  • ONLY summarize the evaluations provided below                             ║
+║  • Do NOT add information from outside these evaluations                     ║
+║  • Do NOT invent company names, statistics, or details                       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+## MODULE: {module_code}
+
+## ASSIGNMENT BRIEF SUMMARY
+
+{brief_summary}
+
+---
+
+## KSB EVALUATIONS (SUMMARIZE ONLY THESE)
+
 {evaluations_text}
-</ksb_evaluations>
 
-Provide your overall summary in the following structure:
+════════════════════════════════════════════════════════════════════════════════
 
-## Overall Assessment
+## YOUR TASK
+
+### 1. GRADE SUMMARY TABLE
+
+| KSB | Grade | Confidence | Brief Task | Key Finding |
+|-----|-------|------------|------------|-------------|
+| K1  | PASS/MERIT/REFERRAL | HIGH/MED/LOW | Task X | brief note |
+| ... | ... | ... | ... | ... |
+
+### 2. OVERALL STATISTICS
+
+```json
+{{
+  "total_ksbs": X,
+  "merit_count": X,
+  "pass_count": X,
+  "referral_count": X,
+  "overall_recommendation": "PASS|MERIT|REFERRAL",
+  "confidence": "HIGH|MEDIUM|LOW"
+}}
+```
+
+### 3. TASK COVERAGE
+
+For each task in the brief, assess coverage:
+
+| Task | KSBs | Completion | Notes |
+|------|------|------------|-------|
+| Task 1 | K1, K2, S16 | ✅ Complete / ⚠️ Partial / ❌ Missing | ... |
+
+### 4. KEY STRENGTHS (Top 3)
+
+1. **[Strength]** - demonstrated in [KSB codes] / [Task X]
+2. ...
+3. ...
+
+### 5. PRIORITY IMPROVEMENTS (Top 3)
+
+1. **[Gap]** - affects [KSB codes] - from [Task X] requirement
+2. ...
+3. ...
+
+### 6. OVERALL ASSESSMENT
 
 Write 2-3 paragraphs covering:
-- Overall quality and effort evident in the submission
-- Pattern of strengths across KSBs
-- Common areas needing development
-- Readiness for the workplace based on demonstrated competencies
+- How well the student addressed the assignment brief
+- Overall quality relative to KSB requirements
+- Specific recommendations for improvement
 
-## KSB Summary Table
+⚠️ ONLY use information from the evaluations above."""
 
-| KSB | Grade | Key Evidence |
-|-----|-------|--------------|
-[For each KSB, summarize in one row]
-
-## Grade Profile
-
-- **Knowledge (K) KSBs:** [Summary of performance across K1, K2, K16, K18, K19, K25]
-- **Skills (S) KSBs:** [Summary of performance across S15, S16, S19, S23]
-- **Behaviours (B) KSBs:** [Summary of performance across B5]
-
-## Key Strengths (Top 3-4)
-1. [Strength] - demonstrated in [KSBs]
-2. [Strength] - demonstrated in [KSBs]
-3. [Strength] - demonstrated in [KSBs]
-
-## Priority Development Areas (Top 3-4)
-1. [Area] - affects [KSBs] - [specific action to improve]
-2. [Area] - affects [KSBs] - [specific action to improve]
-3. [Area] - affects [KSBs] - [specific action to improve]
-
-## Overall Recommendation
-
-[State whether the submission demonstrates readiness across the targeted KSBs, and what key actions would strengthen it]
-
----
-
-Maintain a supportive tone throughout. The goal is to help the student understand their performance and provide a clear path to improvement."""
-
-    # ==========================================================================
-    # HELPER METHODS
-    # ==========================================================================
-    
     @classmethod
     def format_ksb_evaluation(
         cls,
@@ -196,23 +331,48 @@ Maintain a supportive tone throughout. The goal is to help the student understan
         pass_criteria: str,
         merit_criteria: str,
         referral_criteria: str,
-        evidence_text: str
+        evidence_text: str,
+        image_context: str = "",
+        brief_context: str = ""
     ) -> str:
-        """Format the KSB evaluation prompt with provided content."""
-        return cls.KSB_EVALUATION_PROMPT.format(
-            ksb_code=ksb_code,
-            ksb_title=ksb_title,
-            pass_criteria=pass_criteria,
-            merit_criteria=merit_criteria,
-            referral_criteria=referral_criteria,
-            evidence_text=evidence_text
-        )
+        """Format the KSB evaluation prompt with optional brief context."""
+        
+        if brief_context:
+            # Use the enhanced template with brief context
+            return cls.KSB_EVALUATION_WITH_BRIEF_PROMPT.format(
+                ksb_code=ksb_code,
+                ksb_title=ksb_title,
+                pass_criteria=pass_criteria,
+                merit_criteria=merit_criteria,
+                referral_criteria=referral_criteria,
+                evidence_text=evidence_text,
+                image_context=image_context,
+                brief_context=brief_context
+            )
+        else:
+            # Fallback to basic template
+            return cls.KSB_EVALUATION_PROMPT.format(
+                ksb_code=ksb_code,
+                ksb_title=ksb_title,
+                pass_criteria=pass_criteria,
+                merit_criteria=merit_criteria,
+                referral_criteria=referral_criteria,
+                evidence_text=evidence_text,
+                image_context=image_context
+            )
     
     @classmethod
-    def format_overall_summary(cls, evaluations_text: str) -> str:
-        """Format the overall summary prompt with KSB evaluations."""
+    def format_overall_summary(
+        cls, 
+        evaluations_text: str,
+        module_code: str = "",
+        brief_summary: str = ""
+    ) -> str:
+        """Format the overall summary prompt with brief context."""
         return cls.KSB_OVERALL_SUMMARY_PROMPT.format(
-            evaluations_text=evaluations_text
+            evaluations_text=evaluations_text,
+            module_code=module_code or "Unknown",
+            brief_summary=brief_summary or "No assignment brief provided."
         )
     
     @classmethod
@@ -221,43 +381,98 @@ Maintain a supportive tone throughout. The goal is to help the student understan
         return cls.SYSTEM_PROMPT_KSB_MARKER
 
 
-# ==========================================================================
-# EXAMPLE OUTPUT FORMAT
-# ==========================================================================
-
-EXAMPLE_KSB_OUTPUT = """
-## Evidence Found
-
-- "Used supervised learning (text classification) to meet a business objective: faster, more consistent support ticket triage." (page 1 / Section 1)
-- "Defined evaluation metrics aligned to the operational goal (e.g., per-class recall for urgent cases)." (page 7 / Section 7)
-- "The business goal is to improve triage speed, consistency, and reporting in a GDPR-compliant way while controlling cost." (page 1 / Executive Summary)
-
-## Assessment Against Grade Criteria
-
-### Pass Criteria Assessment
-- States a clear business problem: ✅ MET - Support ticket triage speed and consistency (page 1)
-- Identifies appropriate ML approach: ✅ MET - Supervised learning text classification (page 1)
-- Describes why approach fits objective: ✅ MET - Links to operational goal with metrics (page 7)
-
-### Merit Criteria Assessment
-- Strong problem framing: ✅ MET - Clear business context with UK training provider scenario
-- Justification of methodology choices: ⚠️ PARTIALLY MET - Explains text classification but doesn't compare to alternatives
-- Alternatives considered: ❌ NOT MET - No explicit comparison to baseline or alternative approaches
-- Reasoned selection tied to outcomes: ✅ MET - Links to per-class recall for urgent cases
-
-## Recommended Grade: PASS
-
-**Justification:** The submission clearly meets all Pass criteria with a well-defined business problem (support ticket triage), appropriate ML approach (supervised text classification), and explicit connection to business objectives. However, it falls short of Merit as it doesn't discuss alternative approaches or provide explicit comparison with baseline methods.
-
-## Strengths for this KSB
-- Clear articulation of business problem with specific context (UK training provider)
-- Explicit link between ML approach and business metrics (recall for urgent cases)
-- Well-defined scope with GDPR and cost considerations
-
-## To Achieve Merit Grade
-
-The submission needs to demonstrate consideration of alternatives. Specific actions:
-1. Add a brief comparison: Why neural network text classification vs. traditional ML (e.g., SVM, Naive Bayes) or rule-based approaches?
-2. Include a baseline comparison: What would manual triage or a simple keyword-based system achieve?
-3. Quantify the expected improvement: What accuracy/speed improvement justifies the ML approach?
-"""
+def extract_grade_from_evaluation(evaluation: str) -> Dict[str, Any]:
+    """
+    Extract grade and metadata from LLM evaluation output.
+    """
+    result = {
+        'grade': 'UNKNOWN',
+        'confidence': 'LOW',
+        'method': 'none',
+        'pass_criteria_met': None,
+        'merit_criteria_met': None,
+        'brief_requirements_met': [],
+        'brief_requirements_missing': [],
+        'raw_json': None,
+        'possible_hallucination': False
+    }
+    
+    # Check for hallucination indicators
+    hallucination_indicators = [
+        'celestial', 'rovio', 'angry birds', 'founded in', 'headquarters:',
+        'here are some key facts', 'do you want me to provide more',
+        'website:', 'best known for:'
+    ]
+    
+    eval_lower = evaluation.lower()
+    for indicator in hallucination_indicators:
+        if indicator in eval_lower:
+            result['possible_hallucination'] = True
+            break
+    
+    # Method 1: Extract JSON block
+    json_match = re.search(r'```json\s*(\{[^`]+\})\s*```', evaluation, re.DOTALL)
+    if json_match:
+        try:
+            parsed = json.loads(json_match.group(1))
+            if 'grade' in parsed:
+                grade = parsed['grade'].upper().strip()
+                if grade in ['PASS', 'MERIT', 'REFERRAL']:
+                    result['grade'] = grade
+                    result['confidence'] = parsed.get('confidence', 'MEDIUM').upper()
+                    result['method'] = 'json'
+                    result['pass_criteria_met'] = parsed.get('pass_criteria_met')
+                    result['merit_criteria_met'] = parsed.get('merit_criteria_met')
+                    result['brief_requirements_met'] = parsed.get('brief_requirements_met', [])
+                    result['brief_requirements_missing'] = parsed.get('brief_requirements_missing', [])
+                    result['raw_json'] = parsed
+                    return result
+        except json.JSONDecodeError:
+            pass
+    
+    # Method 2: Inline JSON
+    inline_json = re.search(r'\{\s*"ksb_code"[^}]+\}', evaluation, re.DOTALL)
+    if inline_json:
+        try:
+            parsed = json.loads(inline_json.group(0))
+            if 'grade' in parsed:
+                grade = parsed['grade'].upper().strip()
+                if grade in ['PASS', 'MERIT', 'REFERRAL']:
+                    result['grade'] = grade
+                    result['confidence'] = parsed.get('confidence', 'MEDIUM').upper()
+                    result['method'] = 'inline_json'
+                    result['raw_json'] = parsed
+                    return result
+        except json.JSONDecodeError:
+            pass
+    
+    # Method 3: Regex patterns
+    patterns = [
+        r'"grade"\s*:\s*"(PASS|MERIT|REFERRAL)"',
+        r'\*\*Grade\*\*\s*:\s*\*?\*?(PASS|MERIT|REFERRAL)',
+        r'Grade\s+Decision\s*:\s*\*?\*?(PASS|MERIT|REFERRAL)',
+        r'\bgrade\b[:\s]+\*?\*?(PASS|MERIT|REFERRAL)\*?\*?',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, evaluation, re.IGNORECASE)
+        if match:
+            result['grade'] = match.group(1).upper()
+            result['confidence'] = 'MEDIUM'
+            result['method'] = 'regex'
+            return result
+    
+    # Method 4: Heuristics
+    eval_upper = evaluation.upper()
+    
+    if eval_upper.count('❌') > eval_upper.count('✅') or 'NOT FOUND' in eval_upper:
+        result['grade'] = 'REFERRAL'
+    elif 'MERIT' in eval_upper and 'ACHIEVED' in eval_upper:
+        result['grade'] = 'MERIT'
+    else:
+        result['grade'] = 'PASS'
+    
+    result['confidence'] = 'LOW'
+    result['method'] = 'heuristic'
+    
+    return result

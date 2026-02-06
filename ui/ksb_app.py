@@ -1,394 +1,92 @@
 """
-KSB Coursework Marker - Streamlit UI
+KSB Coursework Marker - Agentic Version
 
-Evaluates student coursework against KSB criteria with Pass/Merit/Referral grading.
-Now with configurable hybrid search settings.
+Three-agent architecture:
+1. Analysis Agent - Multimodal document analysis
+2. Scoring Agent - Rubric application and weighted scoring
+3. Feedback Agent - Personalized feedback generation
 """
 import streamlit as st
 import tempfile
 import time
 import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 import sys
+import json
 
-# Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.document_processing import DocxProcessor, PDFProcessor
+from src.document_processing import DocxProcessor, PDFProcessor, ImageProcessor, ProcessedImage
 from src.chunking import SmartChunker
 from src.embeddings import Embedder
 from src.vector_store import ChromaStore
-from src.retrieval import Retriever
 from src.llm import OllamaClient
-from src.criteria.ksb_parser import (
-    KSBRubricParser, 
-    KSBCriterion, 
-    get_module_criteria,
-    get_available_modules,
-    AVAILABLE_MODULES
-)
-from src.prompts.ksb_templates import KSBPromptTemplates
-from config import (
-    OLLAMA_BASE_URL, OLLAMA_MODEL, 
-    EMBEDDING_MODEL,
-    RetrievalConfig, LLMConfig, SearchPresets
-)
+from src.criteria import KSBCriterion, get_module_criteria, get_available_modules
+from src.agents import create_agent_system, AgentOrchestrator
 
-# Configure logging
+
+# Try to import brief module (optional)
+try:
+    from src.brief import get_default_brief
+    HAS_BRIEF = True
+except ImportError:
+    HAS_BRIEF = False
+    def get_default_brief(module): return None
+
+from config import OLLAMA_BASE_URL, OLLAMA_MODEL, EMBEDDING_MODEL
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Page config
 st.set_page_config(
-    page_title="KSB Coursework Marker",
-    page_icon="📝",
+    page_title="KSB Marker",
+    page_icon="⚖️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
 st.markdown("""
 <style>
-    /* Main app styling */
-    .stApp {
-        background: linear-gradient(180deg, #0f1419 0%, #1a1f2e 100%);
-    }
-    
-    /* Header styling */
-    .main-header {
-        font-size: 2.8rem;
-        font-weight: 700;
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        margin-bottom: 0.5rem;
-        text-align: center;
-    }
-    
-    .sub-header {
-        font-size: 1.1rem;
-        color: #8b95a5;
-        margin-bottom: 2rem;
-        text-align: center;
-    }
-    
-    /* Card styling */
-    .metric-card {
-        background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%);
-        border: 1px solid #2d3748;
-        border-radius: 12px;
-        padding: 1.2rem;
-        text-align: center;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-    }
-    
-    .metric-value {
-        font-size: 2rem;
-        font-weight: 700;
-        color: #667eea;
-    }
-    
-    .metric-label {
-        font-size: 0.85rem;
-        color: #8b95a5;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }
-    
-    /* Grade badges */
-    .grade-pass {
-        background: linear-gradient(135deg, #059669 0%, #10b981 100%);
-        color: white;
-        padding: 0.35rem 1rem;
-        border-radius: 20px;
-        font-weight: 600;
-        font-size: 0.85rem;
-        display: inline-block;
-    }
-    
-    .grade-merit {
-        background: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%);
-        color: white;
-        padding: 0.35rem 1rem;
-        border-radius: 20px;
-        font-weight: 600;
-        font-size: 0.85rem;
-        display: inline-block;
-    }
-    
-    .grade-referral {
-        background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);
-        color: white;
-        padding: 0.35rem 1rem;
-        border-radius: 20px;
-        font-weight: 600;
-        font-size: 0.85rem;
-        display: inline-block;
-    }
-    
-    /* Sidebar styling */
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #151922 0%, #1a202c 100%);
-        border-right: 1px solid #2d3748;
-        min-width: 320px;
-    }
-    
-    section[data-testid="stSidebar"] .stMarkdown h2 {
-        color: #e2e8f0;
-        font-size: 1.1rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        margin-top: 1.5rem;
-        padding-bottom: 0.5rem;
-        border-bottom: 2px solid #667eea;
-    }
-    
-    /* Module selector card */
-    .module-card {
-        background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%);
-        border: 1px solid #667eea;
-        border-radius: 10px;
-        padding: 1rem;
-        margin: 0.5rem 0;
-    }
-    
-    .module-name {
-        color: #667eea;
-        font-weight: 600;
-        font-size: 1.05rem;
-    }
-    
-    .module-desc {
-        color: #8b95a5;
-        font-size: 0.9rem;
-        margin-top: 0.3rem;
-    }
-    
-    /* KSB list styling - IMPROVED SIZES */
-    .ksb-category {
-        color: #667eea;
-        font-weight: 600;
-        font-size: 1rem;
-        margin-top: 1rem;
-        margin-bottom: 0.5rem;
-    }
-    
-    .ksb-item {
-        color: #c9d1d9;
-        font-size: 0.95rem;
-        padding: 0.5rem 0;
-        border-left: 3px solid #3d4756;
-        padding-left: 0.75rem;
-        margin: 0.4rem 0;
-        line-height: 1.5;
-        word-wrap: break-word;
-    }
-    
-    .ksb-item:hover {
-        border-left-color: #667eea;
-        background: rgba(102, 126, 234, 0.05);
-    }
-    
-    .ksb-code {
-        color: #667eea;
-        font-weight: 700;
-    }
-    
-    /* Status indicators */
-    .status-ok {
-        background: linear-gradient(135deg, #059669 0%, #10b981 100%);
-        color: white;
-        padding: 0.6rem 1rem;
-        border-radius: 8px;
-        font-size: 0.95rem;
-        margin: 0.4rem 0;
-    }
-    
-    .status-error {
-        background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);
-        color: white;
-        padding: 0.6rem 1rem;
-        border-radius: 8px;
-        font-size: 0.95rem;
-        margin: 0.4rem 0;
-    }
-    
-    /* Search settings card */
-    .search-settings-card {
-        background: linear-gradient(135deg, #1a1f2e 0%, #1e2530 100%);
-        border: 1px solid #3d4756;
-        border-radius: 10px;
-        padding: 1rem;
-        margin: 0.5rem 0;
-    }
-    
-    .search-preset-badge {
-        background: #667eea;
-        color: white;
-        padding: 0.2rem 0.6rem;
-        border-radius: 12px;
-        font-size: 0.75rem;
-        font-weight: 600;
-    }
-    
-    /* File uploader */
-    .stFileUploader {
-        background: #1e2530;
-        border: 2px dashed #3d4756;
-        border-radius: 12px;
-        padding: 1rem;
-    }
-    
-    .stFileUploader:hover {
-        border-color: #667eea;
-    }
-    
-    /* Buttons */
-    .stButton > button {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border: none;
-        border-radius: 10px;
-        padding: 0.75rem 2rem;
-        font-weight: 600;
-        font-size: 1rem;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
-    }
-    
-    .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
-    }
-    
-    .stButton > button:disabled {
-        background: #2d3748;
-        box-shadow: none;
-    }
-    
-    /* Progress bar */
-    .stProgress > div > div {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-    }
-    
-    /* Expanders */
-    .streamlit-expanderHeader {
-        background: #1e2530;
-        border-radius: 8px;
-        border: 1px solid #2d3748;
-        font-size: 1rem;
-    }
-    
-    .streamlit-expanderHeader:hover {
-        border-color: #667eea;
-    }
-    
-    /* Info boxes */
-    .stAlert {
-        background: #1e2530;
-        border: 1px solid #2d3748;
-        border-radius: 10px;
-    }
-    
-    /* Divider */
-    hr {
-        border-color: #2d3748;
-        margin: 1.5rem 0;
-    }
-    
-    /* Summary stats cards */
-    .stat-card {
-        background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%);
-        border-radius: 10px;
-        padding: 1rem;
-        text-align: center;
-        border: 1px solid #2d3748;
-    }
-    
-    .stat-number {
-        font-size: 2.5rem;
-        font-weight: 700;
-    }
-    
-    .stat-number.merit { color: #3b82f6; }
-    .stat-number.pass { color: #10b981; }
-    .stat-number.referral { color: #ef4444; }
-    
-    /* Hide Streamlit branding */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    
-    /* How to use list - IMPROVED */
-    .how-to-item {
-        color: #c9d1d9;
-        font-size: 0.95rem;
-        padding: 0.4rem 0;
-        line-height: 1.5;
-    }
-    
-    /* Slider styling */
-    .stSlider > div > div > div {
-        background: #667eea;
-    }
+    .main-header { font-size: 2.8rem; font-weight: 700; background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; margin-bottom: 0.5rem; }
+    .sub-header { font-size: 1.1rem; color: #8b95a5; margin-bottom: 2rem; text-align: center; }
+    .agent-card { background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); border-radius: 12px; padding: 1rem; border: 1px solid #3d4654; margin: 0.3rem 0; }
+    .agent-card.active { border-color: #667eea; box-shadow: 0 0 15px rgba(102, 126, 234, 0.3); }
+    .agent-card.complete { border-color: #10b981; }
+    .agent-icon { font-size: 1.8rem; }
+    .agent-name { font-size: 1rem; font-weight: 600; color: #e2e8f0; }
+    .agent-status { font-size: 0.8rem; color: #8b95a5; }
+    .tool-tag { background: #2d3748; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; margin: 0.1rem; display: inline-block; color: #a0aec0; }
+    .grade-badge { padding: 0.3rem 0.8rem; border-radius: 20px; font-weight: 600; }
+    .grade-merit { background: #3b82f6; color: white; }
+    .grade-pass { background: #10b981; color: white; }
+    .grade-referral { background: #ef4444; color: white; }
+    .stat-card { background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); border-radius: 10px; padding: 1rem; text-align: center; border: 1px solid #2d3748; }
+    .stat-number { font-size: 2rem; font-weight: 700; }
 </style>
 """, unsafe_allow_html=True)
 
 
 def init_session_state():
-    """Initialize session state variables."""
     defaults = {
         'report_data': None,
         'ksb_criteria': None,
-        'feedback_results': None,
-        'feedback_generated': False,
-        'ollama_connected': False,
-        'embedder_loaded': False,
+        'assignment_brief': None,
+        'agent_results': None,
+        'assessment_complete': False,
+        'current_phase': None,
         'selected_module': 'DSP',
-        # Search settings
-        'search_preset': 'BALANCED',
-        'use_hybrid': True,
-        'semantic_weight': 0.6,
-        'keyword_weight': 0.4,
-        'similarity_threshold': 0.2,
-        'report_top_k': 8,
+        'verbose_mode': False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
 
-def apply_search_preset(preset_name: str):
-    """Apply a search preset configuration."""
-    presets = {
-        'BALANCED': {'use_hybrid': True, 'semantic_weight': 0.6, 'keyword_weight': 0.4, 'similarity_threshold': 0.2, 'report_top_k': 8},
-        'SEMANTIC_HEAVY': {'use_hybrid': True, 'semantic_weight': 0.8, 'keyword_weight': 0.2, 'similarity_threshold': 0.25, 'report_top_k': 6},
-        'KEYWORD_HEAVY': {'use_hybrid': True, 'semantic_weight': 0.4, 'keyword_weight': 0.6, 'similarity_threshold': 0.15, 'report_top_k': 10},
-        'SEMANTIC_ONLY': {'use_hybrid': False, 'semantic_weight': 1.0, 'keyword_weight': 0.0, 'similarity_threshold': 0.3, 'report_top_k': 6},
-        'HIGH_RECALL': {'use_hybrid': True, 'semantic_weight': 0.5, 'keyword_weight': 0.5, 'similarity_threshold': 0.1, 'report_top_k': 12},
-    }
-    
-    if preset_name in presets:
-        preset = presets[preset_name]
-        st.session_state.use_hybrid = preset['use_hybrid']
-        st.session_state.semantic_weight = preset['semantic_weight']
-        st.session_state.keyword_weight = preset['keyword_weight']
-        st.session_state.similarity_threshold = preset['similarity_threshold']
-        st.session_state.report_top_k = preset['report_top_k']
-
-
 @st.cache_resource
 def load_ollama_client():
-    """Load and cache the Ollama client."""
     try:
-        client = OllamaClient(
-            base_url=OLLAMA_BASE_URL,
-            model=OLLAMA_MODEL,
-            timeout=120
-        )
-        return client
+        return OllamaClient(base_url=OLLAMA_BASE_URL, model=OLLAMA_MODEL, timeout=180)
     except Exception as e:
         logger.error(f"Failed to connect to Ollama: {e}")
         return None
@@ -396,7 +94,6 @@ def load_ollama_client():
 
 @st.cache_resource
 def load_embedder():
-    """Load and cache the embedding model."""
     try:
         return Embedder(model_name=EMBEDDING_MODEL)
     except Exception as e:
@@ -404,8 +101,15 @@ def load_embedder():
         return None
 
 
-def process_report(uploaded_file) -> Optional[Dict[str, Any]]:
-    """Process uploaded student report."""
+@st.cache_resource
+def load_image_processor():
+    try:
+        return ImageProcessor(max_size=(1024, 1024))
+    except Exception as e:
+        return None
+
+
+def process_report(uploaded_file, image_processor=None) -> Optional[Dict[str, Any]]:
     if uploaded_file is None:
         return None
     
@@ -415,865 +119,392 @@ def process_report(uploaded_file) -> Optional[Dict[str, Any]]:
             tmp.write(uploaded_file.getvalue())
             tmp_path = tmp.name
         
-        if suffix == '.docx':
-            processor = DocxProcessor()
-            doc = processor.process(tmp_path)
-        elif suffix == '.pdf':
-            processor = PDFProcessor()
-            doc = processor.process(tmp_path)
-        else:
-            st.error(f"Unsupported file type: {suffix}")
-            return None
+        processor = DocxProcessor() if suffix == '.docx' else PDFProcessor()
+        doc = processor.process(tmp_path)
         
         chunker = SmartChunker()
         chunks = chunker.chunk_report(doc.chunks, document_id="report")
         
-        # Get chunking stats
-        stats = chunker.get_chunking_stats(chunks)
+        images = []
+        if image_processor:
+            if suffix == '.docx' and hasattr(doc, 'figures') and doc.figures:
+                images = image_processor.process_docx_images(doc.figures, getattr(doc, 'figure_captions', {}))
+            elif suffix == '.pdf':
+                images = image_processor.process_pdf_images(tmp_path)
         
         return {
-            'chunks': chunks,
+            'chunks': [c.to_dict() if hasattr(c, 'to_dict') else c for c in chunks],
             'title': doc.title or uploaded_file.name,
             'filename': uploaded_file.name,
-            'total_pages': doc.total_pages_estimate,
-            'figures': getattr(doc, 'figures', {}),
+            'total_pages': getattr(doc, 'total_pages', 1) or getattr(doc, 'total_pages_estimate', 1),
+            'pages_are_accurate': getattr(doc, 'pages_are_accurate', suffix == '.pdf'),
             'raw_text': doc.raw_text,
-            'chunking_stats': stats
+            'images': images,
+            'tmp_path': tmp_path
         }
-        
     except Exception as e:
         logger.exception("Error processing report")
-        st.error(f"Error processing file: {str(e)}")
+        st.error(f"Error: {str(e)}")
         return None
 
 
-def index_report(
-    report_data: Dict[str, Any],
-    embedder: Embedder,
-    vector_store: ChromaStore
-) -> bool:
-    """Index the report into vector store."""
-    progress = st.progress(0, text="Indexing report...")
-    
-    try:
-        vector_store.clear_report()
-        progress.progress(20, text="Embedding report chunks...")
-        
-        report_texts = [c.content for c in report_data['chunks']]
-        report_embeddings = embedder.embed_documents(report_texts)
-        progress.progress(70, text="Storing in vector database...")
-        
-        report_dicts = [c.to_dict() for c in report_data['chunks']]
-        vector_store.add_report(report_dicts, report_embeddings)
-        progress.progress(100, text="Indexing complete!")
-        
-        time.sleep(0.3)
-        progress.empty()
-        return True
-        
-    except Exception as e:
-        logger.exception("Error indexing report")
-        st.error(f"Error indexing: {str(e)}")
-        return False
-
-
-def evaluate_ksb(
-    ksb: KSBCriterion,
-    embedder: Embedder,
-    vector_store: ChromaStore,
-    llm: OllamaClient,
-    search_settings: Dict[str, Any]
-) -> Dict[str, Any]:
-    """Evaluate student work against a single KSB with configurable search."""
-    
-    # Create retriever with current search settings
-    retriever = Retriever(
-        embedder=embedder,
-        vector_store=vector_store,
-        report_top_k=search_settings['report_top_k'],
-        max_context_tokens=RetrievalConfig.MAX_CONTEXT_TOKENS,
-        similarity_threshold=search_settings['similarity_threshold'],
-        use_hybrid=search_settings['use_hybrid'],
-        semantic_weight=search_settings['semantic_weight'],
-        keyword_weight=search_settings['keyword_weight']
-    )
-    
-    query = f"{ksb.code} {ksb.title} {ksb.pass_criteria}"
-    
-    result = retriever.retrieve_for_criterion(query, ksb.code)
-    evidence_text = retriever.format_context_for_llm(result)
-    
-    prompt = KSBPromptTemplates.format_ksb_evaluation(
-        ksb_code=ksb.code,
-        ksb_title=ksb.title,
-        pass_criteria=ksb.pass_criteria,
-        merit_criteria=ksb.merit_criteria,
-        referral_criteria=ksb.referral_criteria,
-        evidence_text=evidence_text
-    )
-    
-    system_prompt = KSBPromptTemplates.get_system_prompt()
-    evaluation = llm.generate(
-        prompt=prompt,
-        system_prompt=system_prompt,
-        temperature=LLMConfig.EVALUATION_TEMPERATURE,
-        max_tokens=1500
-    )
-    
-    grade = extract_grade_from_evaluation(evaluation)
-    
-    return {
-        'ksb_code': ksb.code,
-        'ksb_title': ksb.title,
-        'ksb_category': ksb.category,
-        'pass_criteria': ksb.pass_criteria,
-        'merit_criteria': ksb.merit_criteria,
-        'referral_criteria': ksb.referral_criteria,
-        'evaluation': evaluation,
-        'grade': grade,
-        'evidence_count': len(result.retrieved_chunks),
-        'search_strategy': result.search_strategy,
-        'query_variations': len(result.query_variations)
-    }
-
-
-def extract_grade_from_evaluation(evaluation: str) -> str:
-    """Extract the recommended grade from evaluation text."""
-    import re
-    
-    match = re.search(
-        r'Recommended Grade[:\s]+\*?\*?(PASS|MERIT|REFERRAL)\*?\*?',
-        evaluation,
-        re.IGNORECASE
-    )
-    
-    if match:
-        return match.group(1).upper()
-    
-    eval_upper = evaluation.upper()
-    if 'REFERRAL' in eval_upper and 'NOT MET' in eval_upper:
-        return 'REFERRAL'
-    elif 'MERIT' in eval_upper and 'EXCEEDS' in eval_upper:
-        return 'MERIT'
-    else:
-        return 'PASS'
-
-
-def generate_overall_summary(
-    ksb_evaluations: List[Dict[str, Any]],
-    llm: OllamaClient
-) -> str:
-    """Generate overall summary from KSB evaluations."""
-    
-    evals_text = ""
-    for eval_data in ksb_evaluations:
-        evals_text += f"\n\n{'='*60}\n"
-        evals_text += f"## {eval_data['ksb_code']} - {eval_data['ksb_title']}\n"
-        evals_text += f"**Recommended Grade: {eval_data['grade']}**\n\n"
-        evals_text += eval_data['evaluation']
-    
-    prompt = KSBPromptTemplates.format_overall_summary(evals_text)
-    system_prompt = KSBPromptTemplates.get_system_prompt()
-    
-    summary = llm.generate(
-        prompt=prompt,
-        system_prompt=system_prompt,
-        temperature=LLMConfig.SUMMARY_TEMPERATURE,
-        max_tokens=2000
-    )
-    
-    return summary
-
-
-def generate_feedback(
-    ksb_criteria: List[KSBCriterion],
-    embedder: Embedder,
-    vector_store: ChromaStore,
-    llm: OllamaClient,
-    search_settings: Dict[str, Any]
-) -> Optional[Dict[str, Any]]:
-    """Generate feedback for all KSBs with configurable search."""
-    
-    ksb_evaluations = []
-    total_ksbs = len(ksb_criteria)
-    
-    progress_bar = st.progress(0, text="Evaluating KSBs...")
-    status_text = st.empty()
-    
-    for i, ksb in enumerate(ksb_criteria):
-        status_text.markdown(f"**Evaluating {ksb.code}:** {ksb.title[:50]}...")
-        
-        try:
-            eval_result = evaluate_ksb(ksb, embedder, vector_store, llm, search_settings)
-            ksb_evaluations.append(eval_result)
-        except Exception as e:
-            logger.exception(f"Error evaluating {ksb.code}")
-            ksb_evaluations.append({
-                'ksb_code': ksb.code,
-                'ksb_title': ksb.title,
-                'ksb_category': ksb.category,
-                'evaluation': f"Error during evaluation: {str(e)}",
-                'grade': 'ERROR',
-                'evidence_count': 0,
-                'search_strategy': 'N/A',
-                'query_variations': 0
-            })
-        
-        progress_bar.progress((i + 1) / total_ksbs, 
-                             text=f"Evaluated {i + 1}/{total_ksbs} KSBs")
-    
-    status_text.markdown("**Generating overall summary...**")
-    overall_summary = generate_overall_summary(ksb_evaluations, llm)
-    
-    progress_bar.empty()
-    status_text.empty()
-    
-    return {
-        'ksb_evaluations': ksb_evaluations,
-        'overall_summary': overall_summary,
-        'search_settings': search_settings
-    }
-
-
-def display_grade_badge(grade: str):
-    """Display a colored grade badge."""
-    if grade == 'MERIT':
-        st.markdown(f'<span class="grade-merit">MERIT</span>', unsafe_allow_html=True)
-    elif grade == 'PASS':
-        st.markdown(f'<span class="grade-pass">PASS</span>', unsafe_allow_html=True)
-    elif grade == 'REFERRAL':
-        st.markdown(f'<span class="grade-referral">REFERRAL</span>', unsafe_allow_html=True)
-    else:
-        st.markdown(f'**{grade}**')
-
-
-def display_ksb_summary_table(evaluations: List[Dict[str, Any]]):
-    """Display a summary table of all KSB grades."""
-    
-    total = len(evaluations)
-    merits = sum(1 for e in evaluations if e['grade'] == 'MERIT')
-    passes = sum(1 for e in evaluations if e['grade'] == 'PASS')
-    referrals = sum(1 for e in evaluations if e['grade'] == 'REFERRAL')
-    
-    st.markdown("""
-    <div style="background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); 
-                border-radius: 16px; 
-                padding: 1.5rem; 
-                margin: 1rem 0;
-                border: 1px solid #2d3748;">
-        <h3 style="color: #e2e8f0; margin-bottom: 1rem; text-align: center;">📊 Assessment Summary</h3>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown(f"""
-        <div class="stat-card">
-            <div class="stat-number" style="color: #667eea;">{total}</div>
-            <div class="metric-label">Total KSBs</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown(f"""
-        <div class="stat-card">
-            <div class="stat-number merit">{merits}</div>
-            <div class="metric-label">Merit</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        st.markdown(f"""
-        <div class="stat-card">
-            <div class="stat-number pass">{passes}</div>
-            <div class="metric-label">Pass</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col4:
-        st.markdown(f"""
-        <div class="stat-card">
-            <div class="stat-number referral">{referrals}</div>
-            <div class="metric-label">Referral</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    st.markdown("<br>", unsafe_allow_html=True)
-    
-    knowledge = [e for e in evaluations if e.get('ksb_category') == 'Knowledge']
-    skills = [e for e in evaluations if e.get('ksb_category') == 'Skill']
-    behaviours = [e for e in evaluations if e.get('ksb_category') == 'Behaviour']
-    
+def display_agent_status(phase: str):
+    """Display agent status cards."""
     col1, col2, col3 = st.columns(3)
     
+    analysis_status = 'complete' if phase in ['scoring', 'feedback', 'complete'] else 'active' if phase == 'analysis' else 'waiting'
+    scoring_status = 'complete' if phase in ['feedback', 'complete'] else 'active' if phase == 'scoring' else 'waiting'
+    feedback_status = 'complete' if phase == 'complete' else 'active' if phase == 'feedback' else 'waiting'
+    
+    def status_class(s):
+        return 'active' if s == 'active' else 'complete' if s == 'complete' else ''
+    
+    def status_text(s):
+        return '⚡ Processing...' if s == 'active' else '✓ Complete' if s == 'complete' else '⏳ Waiting'
+    
     with col1:
-        st.markdown("""
-        <div style="background: #1e2530; border-radius: 10px; padding: 1rem; border: 1px solid #2d3748;">
-            <p style="color: #667eea; font-weight: 600; margin-bottom: 0.5rem;">📘 Knowledge</p>
+        st.markdown(f"""
+        <div class="agent-card {status_class(analysis_status)}">
+            <span class="agent-icon">🔍</span>
+            <span class="agent-name">Analysis</span>
+            <div class="agent-status">{status_text(analysis_status)}</div>
+            <div><span class="tool-tag">text</span><span class="tool-tag">chart</span><span class="tool-tag">image</span><span class="tool-tag">evidence</span></div>
         </div>
         """, unsafe_allow_html=True)
-        for e in knowledge:
-            grade_color = "#3b82f6" if e['grade'] == 'MERIT' else "#10b981" if e['grade'] == 'PASS' else "#ef4444"
-            st.markdown(f"""
-            <div style="display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #2d3748;">
-                <span style="color: #a0aec0;">{e['ksb_code']}</span>
-                <span style="color: {grade_color}; font-weight: 600;">{e['grade']}</span>
-            </div>
-            """, unsafe_allow_html=True)
     
     with col2:
-        st.markdown("""
-        <div style="background: #1e2530; border-radius: 10px; padding: 1rem; border: 1px solid #2d3748;">
-            <p style="color: #667eea; font-weight: 600; margin-bottom: 0.5rem;">🔧 Skills</p>
+        st.markdown(f"""
+        <div class="agent-card {status_class(scoring_status)}">
+            <span class="agent-icon">📊</span>
+            <span class="agent-name">Scoring</span>
+            <div class="agent-status">{status_text(scoring_status)}</div>
+            <div><span class="tool-tag">rubric</span><span class="tool-tag">weights</span><span class="tool-tag">grade</span></div>
         </div>
         """, unsafe_allow_html=True)
-        for e in skills:
-            grade_color = "#3b82f6" if e['grade'] == 'MERIT' else "#10b981" if e['grade'] == 'PASS' else "#ef4444"
-            st.markdown(f"""
-            <div style="display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #2d3748;">
-                <span style="color: #a0aec0;">{e['ksb_code']}</span>
-                <span style="color: {grade_color}; font-weight: 600;">{e['grade']}</span>
-            </div>
-            """, unsafe_allow_html=True)
     
     with col3:
-        st.markdown("""
-        <div style="background: #1e2530; border-radius: 10px; padding: 1rem; border: 1px solid #2d3748;">
-            <p style="color: #667eea; font-weight: 600; margin-bottom: 0.5rem;">💡 Behaviours</p>
-        </div>
-        """, unsafe_allow_html=True)
-        for e in behaviours:
-            grade_color = "#3b82f6" if e['grade'] == 'MERIT' else "#10b981" if e['grade'] == 'PASS' else "#ef4444"
-            st.markdown(f"""
-            <div style="display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #2d3748;">
-                <span style="color: #a0aec0;">{e['ksb_code']}</span>
-                <span style="color: {grade_color}; font-weight: 600;">{e['grade']}</span>
-            </div>
-            """, unsafe_allow_html=True)
-
-
-def display_feedback(results: Dict[str, Any]):
-    """Display the generated feedback."""
-    
-    display_ksb_summary_table(results.get('ksb_evaluations', []))
-    
-    # Display search settings used
-    if 'search_settings' in results:
-        settings = results['search_settings']
         st.markdown(f"""
-        <div style="background: #1a1f2e; border: 1px solid #3d4756; border-radius: 8px; padding: 0.75rem; margin: 1rem 0;">
-            <span style="color: #8b95a5; font-size: 0.85rem;">
-                🔍 Search: <b style="color: #667eea;">{'Hybrid' if settings['use_hybrid'] else 'Semantic Only'}</b> | 
-                Semantic: <b>{int(settings['semantic_weight']*100)}%</b> | 
-                Keyword: <b>{int(settings['keyword_weight']*100)}%</b> |
-                Threshold: <b>{settings['similarity_threshold']}</b> |
-                Top-K: <b>{settings['report_top_k']}</b>
-            </span>
+        <div class="agent-card {status_class(feedback_status)}">
+            <span class="agent-icon">💬</span>
+            <span class="agent-name">Feedback</span>
+            <div class="agent-status">{status_text(feedback_status)}</div>
+            <div><span class="tool-tag">strengths</span><span class="tool-tag">gaps</span><span class="tool-tag">format</span></div>
         </div>
         """, unsafe_allow_html=True)
-    
-    st.markdown("<br>", unsafe_allow_html=True)
-    
-    st.markdown("""
-    <div style="background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); 
-                border-radius: 16px; 
-                padding: 1.5rem; 
-                margin: 1rem 0;
-                border: 1px solid #2d3748;">
-        <h3 style="color: #e2e8f0; margin-bottom: 0.5rem;">📝 Overall Assessment</h3>
-    </div>
-    """, unsafe_allow_html=True)
-    st.markdown(results.get('overall_summary', 'No summary available.'))
-    
-    st.markdown("<br>", unsafe_allow_html=True)
-    
-    st.markdown("""
-    <div style="background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); 
-                border-radius: 16px; 
-                padding: 1.5rem; 
-                margin: 1rem 0;
-                border: 1px solid #2d3748;">
-        <h3 style="color: #e2e8f0; margin-bottom: 0.5rem;">📋 Detailed KSB Evaluations</h3>
-        <p style="color: #8b95a5; font-size: 0.9rem;">Click on each KSB to view detailed feedback</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    for eval_data in results.get('ksb_evaluations', []):
-        grade = eval_data.get('grade', 'N/A')
-        grade_color = (
-            "🟢" if grade == 'MERIT' 
-            else "🟡" if grade == 'PASS' 
-            else "🔴"
-        )
-        
-        evidence_info = f"{eval_data.get('evidence_count', 0)} chunks"
-        if eval_data.get('query_variations'):
-            evidence_info += f", {eval_data['query_variations']} queries"
-        
-        with st.expander(
-            f"{grade_color} **{eval_data['ksb_code']}** - {eval_data['ksb_title'][:50]}... [{grade}]",
-            expanded=False
-        ):
-            # Show search info
-            st.markdown(f"""
-            <div style="background: #1a1f2e; padding: 0.5rem; border-radius: 6px; margin-bottom: 1rem;">
-                <span style="color: #8b95a5; font-size: 0.85rem;">
-                    📊 Evidence: <b style="color: #667eea;">{evidence_info}</b> | 
-                    Strategy: <b>{eval_data.get('search_strategy', 'N/A')}</b>
-                </span>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown("**KSB Criteria:**")
-            
-            criteria_tabs = st.tabs(["Pass", "Merit", "Referral"])
-            with criteria_tabs[0]:
-                st.info(eval_data.get('pass_criteria', 'N/A'))
-            with criteria_tabs[1]:
-                st.success(eval_data.get('merit_criteria', 'N/A'))
-            with criteria_tabs[2]:
-                st.error(eval_data.get('referral_criteria', 'N/A'))
-            
-            st.markdown("---")
-            st.markdown("**Evaluation:**")
-            st.markdown(eval_data.get('evaluation', 'No evaluation available.'))
 
 
-def render_search_settings():
-    """Render the search settings panel in the sidebar."""
-    st.markdown("## 🔍 Search Settings")
+def run_agent_pipeline(report_data, ksb_criteria, assignment_brief, llm, embedder, progress_callback, verbose_log=None):
+    """Run the three-agent pipeline."""
     
-    # Preset selector
-    preset_options = {
-        'BALANCED': '⚖️ Balanced (60/40)',
-        'SEMANTIC_HEAVY': '🧠 Semantic Heavy (80/20)',
-        'KEYWORD_HEAVY': '🔤 Keyword Heavy (40/60)',
-        'SEMANTIC_ONLY': '🎯 Semantic Only',
-        'HIGH_RECALL': '📚 High Recall (50/50)',
-        'CUSTOM': '⚙️ Custom'
-    }
+    # Import here to set verbose callback
+    from src.agents.core import BaseAgent
     
-    selected_preset = st.selectbox(
-        "Search Preset",
-        options=list(preset_options.keys()),
-        format_func=lambda x: preset_options[x],
-        index=list(preset_options.keys()).index(st.session_state.get('search_preset', 'BALANCED')),
-        help="Choose a pre-configured search strategy or customize your own"
+    # Set up verbose callback if log container provided
+    if verbose_log is not None:
+        def verbose_callback(agent, message, data=None):
+            verbose_log.append(f"[{agent.upper()}] {message}")
+        BaseAgent.verbose_callback = verbose_callback
+    else:
+        BaseAgent.verbose_callback = None
+    
+    # Create vector store and index
+    tmpdir = tempfile.mkdtemp()
+    vector_store = ChromaStore(persist_directory=tmpdir)
+    
+    progress_callback("Indexing report...", 0.05, "analysis")
+    report_texts = [c.get('content', '') for c in report_data['chunks']]
+    report_embeddings = embedder.embed_documents(report_texts)
+    vector_store.add_report(report_data['chunks'], report_embeddings)
+    
+    if verbose_log is not None:
+        verbose_log.append(f"[INDEX] Indexed {len(report_data['chunks'])} chunks")
+    
+    # Create agent system
+    orchestrator = create_agent_system(
+        llm=llm,
+        embedder=embedder,
+        vector_store=vector_store,
+        verbose=st.session_state.verbose_mode
     )
     
-    # Apply preset if changed (and not custom)
-    if selected_preset != st.session_state.search_preset:
-        st.session_state.search_preset = selected_preset
-        if selected_preset != 'CUSTOM':
-            apply_search_preset(selected_preset)
-            st.rerun()
+    # Convert KSB criteria
+    ksb_list = []
+    for ksb in ksb_criteria:
+        if hasattr(ksb, 'code'):
+            ksb_list.append({
+                'code': ksb.code,
+                'title': ksb.title,
+                'pass_criteria': ksb.pass_criteria,
+                'merit_criteria': ksb.merit_criteria,
+                'referral_criteria': ksb.referral_criteria,
+                'category': ksb.category
+            })
+        else:
+            ksb_list.append(ksb)
     
-    # Show current settings
-    with st.expander("⚙️ Advanced Settings", expanded=(selected_preset == 'CUSTOM')):
-        # Hybrid toggle
-        use_hybrid = st.toggle(
-            "Enable Hybrid Search",
-            value=st.session_state.use_hybrid,
-            help="Combine semantic (meaning) and keyword (BM25) search"
-        )
-        
-        if use_hybrid != st.session_state.use_hybrid:
-            st.session_state.use_hybrid = use_hybrid
-            st.session_state.search_preset = 'CUSTOM'
-        
-        if use_hybrid:
-            # Weight sliders
-            st.markdown("**Search Weights**")
-            
-            semantic_weight = st.slider(
-                "Semantic Weight",
-                min_value=0.0,
-                max_value=1.0,
-                value=st.session_state.semantic_weight,
-                step=0.1,
-                help="Weight for meaning-based similarity search"
-            )
-            
-            if semantic_weight != st.session_state.semantic_weight:
-                st.session_state.semantic_weight = semantic_weight
-                st.session_state.keyword_weight = 1.0 - semantic_weight
-                st.session_state.search_preset = 'CUSTOM'
-            
-            # Show keyword weight (auto-calculated)
-            st.markdown(f"""
-            <div style="background: #1a1f2e; padding: 0.5rem; border-radius: 6px; margin: 0.5rem 0;">
-                <span style="color: #8b95a5; font-size: 0.85rem;">
-                    Keyword Weight: <b style="color: #667eea;">{1.0 - semantic_weight:.1f}</b>
-                </span>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Similarity threshold
-        similarity_threshold = st.slider(
-            "Similarity Threshold",
-            min_value=0.0,
-            max_value=0.5,
-            value=st.session_state.similarity_threshold,
-            step=0.05,
-            help="Minimum similarity score to include a chunk (lower = more results)"
-        )
-        
-        if similarity_threshold != st.session_state.similarity_threshold:
-            st.session_state.similarity_threshold = similarity_threshold
-            st.session_state.search_preset = 'CUSTOM'
-        
-        # Top-K
-        report_top_k = st.slider(
-            "Results per KSB",
-            min_value=3,
-            max_value=15,
-            value=st.session_state.report_top_k,
-            step=1,
-            help="Number of text chunks to retrieve for each KSB"
-        )
-        
-        if report_top_k != st.session_state.report_top_k:
-            st.session_state.report_top_k = report_top_k
-            st.session_state.search_preset = 'CUSTOM'
+    # Convert brief
+    brief_dict = None
+    if assignment_brief:
+        brief_dict = assignment_brief.to_dict() if hasattr(assignment_brief, 'to_dict') else assignment_brief
     
-    # Show current config summary
+    # Convert images
+    images = []
+    for img in report_data.get('images', []):
+        if hasattr(img, 'image_id'):
+            images.append({
+                'image_id': img.image_id,
+                'caption': getattr(img, 'caption', ''),
+                'base64': getattr(img, 'base64_data', '')
+            })
+        elif isinstance(img, dict):
+            images.append(img)
+    
+    # Run pipeline with progress callbacks
+    def agent_progress(msg, pct):
+        if "Analysis" in msg:
+            progress_callback(msg, pct, "analysis")
+        elif "Scoring" in msg:
+            progress_callback(msg, pct, "scoring")
+        elif "Feedback" in msg:
+            progress_callback(msg, pct, "feedback")
+        else:
+            progress_callback(msg, pct, "complete")
+    
+    results = orchestrator.process(
+        chunks=report_data['chunks'],
+        ksb_criteria=ksb_list,
+        assignment_brief=brief_dict,
+        images=images,
+        progress_callback=agent_progress
+    )
+    
+    return results
+
+
+def display_results(results: Dict[str, Any]):
+    """Display assessment results."""
+    
+    summary = results.get("overall_summary", {})
+    
+    st.markdown("## 📊 Assessment Results")
+    
+    # Grade cards
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#fff">{summary.get("total_ksbs", 0)}</div><div>Total KSBs</div></div>', unsafe_allow_html=True)
+    with col2:
+        st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#10b981">{summary.get("merit_count", 0)}</div><div>Merit</div></div>', unsafe_allow_html=True)
+    with col3:
+        st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#3b82f6">{summary.get("pass_count", 0)}</div><div>Pass</div></div>', unsafe_allow_html=True)
+    with col4:
+        st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#ef4444">{summary.get("referral_count", 0)}</div><div>Referral</div></div>', unsafe_allow_html=True)
+    
+    # Overall recommendation
+    overall = summary.get("overall_recommendation", "UNKNOWN")
+    grade_class = f"grade-{overall.lower()}"
     st.markdown(f"""
-    <div class="search-settings-card">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-            <span style="color: #8b95a5; font-size: 0.85rem;">Current Config</span>
-            <span class="search-preset-badge">{st.session_state.search_preset}</span>
-        </div>
-        <div style="color: #c9d1d9; font-size: 0.85rem; line-height: 1.6;">
-            {'🔀 Hybrid' if st.session_state.use_hybrid else '🎯 Semantic'} | 
-            S:{int(st.session_state.semantic_weight*100)}% K:{int(st.session_state.keyword_weight*100)}%<br>
-            Threshold: {st.session_state.similarity_threshold} | Top-K: {st.session_state.report_top_k}
-        </div>
+    <div style="text-align: center; margin: 1rem 0;">
+        <span class="grade-badge {grade_class}">{overall}</span>
+        <span style="color: #8b95a5; margin-left: 0.5rem;">Overall Recommendation</span>
     </div>
     """, unsafe_allow_html=True)
-
-
-def get_current_search_settings() -> Dict[str, Any]:
-    """Get current search settings from session state."""
-    return {
-        'use_hybrid': st.session_state.use_hybrid,
-        'semantic_weight': st.session_state.semantic_weight,
-        'keyword_weight': st.session_state.keyword_weight,
-        'similarity_threshold': st.session_state.similarity_threshold,
-        'report_top_k': st.session_state.report_top_k
-    }
+    
+    # Overall feedback
+    if results.get("overall_feedback"):
+        with st.expander("📝 Overall Feedback", expanded=True):
+            st.markdown(results["overall_feedback"])
+    
+    # Key strengths and improvements
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("### 💪 Key Strengths")
+        for s in summary.get("key_strengths", [])[:5]:
+            st.markdown(f"- {s}")
+    with col2:
+        st.markdown("### 📈 Priority Improvements")
+        for i in summary.get("priority_improvements", [])[:5]:
+            st.markdown(f"- {i}")
+    
+    # KSB Details
+    st.markdown("## 📋 KSB Breakdown")
+    
+    for sr in results.get("scoring_results", []):
+        ksb_code = sr.get("ksb_code", "")
+        grade = sr.get("grade", "UNKNOWN")
+        confidence = sr.get("confidence", "")
+        ksb_title = sr.get("ksb_title", "")
+        
+        icon = "🟢" if grade == "MERIT" else "🟡" if grade == "PASS" else "🔴"
+        
+        #with st.expander(f"{icon} **{ksb_code}** - {sr.get('ksb_title', '')[:150]}... [{grade}]"):
+        with st.expander(f"{icon} **{ksb_code}** - {ksb_title} [{grade}]"):
+            st.markdown(f"**Confidence:** {confidence} | **Weighted Score:** {sr.get('weighted_score', 0):.3f}")
+            st.markdown(f"**Rationale:** {sr.get('rationale', '')}")
+            
+            # Show feedback
+            fb = next((f for f in results.get("feedback_results", []) if f.get("ksb_code") == ksb_code), {})
+            if fb.get("formatted_feedback"):
+                st.markdown(fb["formatted_feedback"])
+            
+            # Gaps
+            gaps = sr.get("gaps_identified", [])
+            if gaps:
+                st.markdown("**Gaps:**")
+                for g in gaps[:5]:
+                    st.markdown(f"- {g}")
 
 
 def main():
-    """Main application entry point."""
     init_session_state()
     
-    # Header
-    st.markdown('<p class="main-header">📝 KSB Coursework Marker</p>', 
-                unsafe_allow_html=True)
-    st.markdown(
-        '<p class="sub-header">AI-powered KSB assessment with hybrid search</p>',
-        unsafe_allow_html=True
-    )
+    st.markdown('<p class="main-header">🤖 KSB Coursework Marker</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Three-Agent Assessment System</p>', unsafe_allow_html=True)
     
     # Sidebar
     with st.sidebar:
-        # Logo/Brand area
-        st.markdown("""
-        <div style="text-align: center; padding: 1rem 0;">
-            <span style="font-size: 2.5rem;">🎓</span>
-            <p style="color: #667eea; font-weight: 600; margin: 0.5rem 0 0 0; font-size: 1.2rem;">KSB Marker</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
         st.markdown("## ⚡ Status")
         
-        # Load components
         llm = load_ollama_client()
         embedder = load_embedder()
+        image_processor = load_image_processor()
         
         if llm:
-            st.markdown('<div class="status-ok">✓ Ollama Connected</div>', unsafe_allow_html=True)
-            st.session_state.ollama_connected = True
+            st.success(f"✓ Ollama: {OLLAMA_MODEL}")
         else:
-            st.markdown('<div class="status-error">✗ Ollama Disconnected</div>', unsafe_allow_html=True)
-            st.caption("Run: `ollama serve`")
+            st.error("✗ Ollama not connected")
         
         if embedder:
-            st.markdown(f'<div class="status-ok">✓ Embedder Ready ({embedder.embedding_dim}d)</div>', unsafe_allow_html=True)
-            st.session_state.embedder_loaded = True
+            st.success(f"✓ Embedder ({embedder.embedding_dim}d)")
         else:
-            st.markdown('<div class="status-error">✗ Embedder Error</div>', unsafe_allow_html=True)
+            st.error("✗ Embedder error")
         
+        if image_processor:
+            st.success("✓ Vision ready")
+        
+        st.markdown("---")
+        
+        # Module selection
         st.markdown("## 📚 Module")
-        
         modules = get_available_modules()
         module_options = {code: info['name'] for code, info in modules.items()}
+        selected = st.selectbox("Module", list(module_options.keys()), format_func=lambda x: module_options[x],
+                               index=list(module_options.keys()).index(st.session_state.selected_module))
         
-        selected_module = st.selectbox(
-            "Select Module",
-            options=list(module_options.keys()),
-            format_func=lambda x: module_options[x],
-            index=list(module_options.keys()).index(st.session_state.selected_module),
-            help="Choose which module's KSB rubric to use",
-            label_visibility="collapsed"
-        )
-        
-        if selected_module != st.session_state.selected_module:
-            st.session_state.selected_module = selected_module
+        if selected != st.session_state.selected_module:
+            st.session_state.selected_module = selected
             st.session_state.ksb_criteria = None
-            st.session_state.feedback_results = None
-            st.session_state.feedback_generated = False
+            st.session_state.assignment_brief = None
             st.rerun()
-        
-        module_info = modules[selected_module]
-        st.markdown(f"""
-        <div class="module-card">
-            <div class="module-name">{module_info['ksb_count']} KSBs to assess</div>
-            <div class="module-desc">{module_info['description']}</div>
-        </div>
-        """, unsafe_allow_html=True)
         
         if st.session_state.ksb_criteria is None:
-            st.session_state.ksb_criteria = get_module_criteria(selected_module)
+            st.session_state.ksb_criteria = get_module_criteria(selected)
         
-        if st.session_state.ksb_criteria:
-            with st.expander(f"📋 View {len(st.session_state.ksb_criteria)} KSBs", expanded=False):
-                knowledge = [k for k in st.session_state.ksb_criteria if k.code.startswith('K')]
-                skills = [k for k in st.session_state.ksb_criteria if k.code.startswith('S')]
-                behaviours = [k for k in st.session_state.ksb_criteria if k.code.startswith('B')]
-                
-                if knowledge:
-                    st.markdown('<p class="ksb-category">📘 Knowledge</p>', unsafe_allow_html=True)
-                    for ksb in knowledge:
-                        title_display = ksb.title if len(ksb.title) <= 60 else ksb.title[:57] + "..."
-                        st.markdown(
-                            f'<div class="ksb-item"><span class="ksb-code">{ksb.code}</span>: {title_display}</div>', 
-                            unsafe_allow_html=True
-                        )
-                
-                if skills:
-                    st.markdown('<p class="ksb-category">🔧 Skills</p>', unsafe_allow_html=True)
-                    for ksb in skills:
-                        title_display = ksb.title if len(ksb.title) <= 60 else ksb.title[:57] + "..."
-                        st.markdown(
-                            f'<div class="ksb-item"><span class="ksb-code">{ksb.code}</span>: {title_display}</div>', 
-                            unsafe_allow_html=True
-                        )
-                
-                if behaviours:
-                    st.markdown('<p class="ksb-category">💡 Behaviours</p>', unsafe_allow_html=True)
-                    for ksb in behaviours:
-                        title_display = ksb.title if len(ksb.title) <= 60 else ksb.title[:57] + "..."
-                        st.markdown(
-                            f'<div class="ksb-item"><span class="ksb-code">{ksb.code}</span>: {title_display}</div>', 
-                            unsafe_allow_html=True
-                        )
+        if HAS_BRIEF and st.session_state.assignment_brief is None:
+            st.session_state.assignment_brief = get_default_brief(selected)
         
-        # Search Settings Section
-        render_search_settings()
+        st.caption(f"{len(st.session_state.ksb_criteria)} KSBs")
         
-        st.markdown("## 📖 How to Use")
-        st.markdown("""
-        <div class="how-to-item">1️⃣ Select module (DSP, MLCC, AIDI)</div>
-        <div class="how-to-item">2️⃣ Configure search settings</div>
-        <div class="how-to-item">3️⃣ Upload student report (DOCX/PDF)</div>
-        <div class="how-to-item">4️⃣ Click Generate Assessment</div>
-        <div class="how-to-item">5️⃣ Review KSB grades & feedback</div>
-        """, unsafe_allow_html=True)
+        st.markdown("---")
+        st.session_state.verbose_mode = st.checkbox("Verbose mode", value=st.session_state.verbose_mode)
         
-        st.divider()
-        
-        if st.button("🔄 Reset All", use_container_width=True):
-            for key in ['report_data', 'feedback_results', 'feedback_generated', 'ksb_criteria']:
-                st.session_state[key] = None if key != 'feedback_generated' else False
+        if st.button("🔄 Reset"):
+            for key in ['report_data', 'agent_results', 'assessment_complete', 'current_phase']:
+                st.session_state[key] = None if key != 'assessment_complete' else False
             st.rerun()
     
-    # Main content area
-    st.markdown("""
-    <div style="background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); 
-                border-radius: 16px; 
-                padding: 2rem; 
-                margin: 1rem 0;
-                border: 1px solid #2d3748;">
-        <h2 style="color: #e2e8f0; margin-bottom: 0.5rem;">📄 Student Report</h2>
-        <p style="color: #8b95a5; font-size: 0.9rem;">Upload the coursework document to begin assessment</p>
-    </div>
-    """, unsafe_allow_html=True)
+    # Main content
+    col1, col2 = st.columns([2, 1])
     
-    uploaded_file = st.file_uploader(
-        "Upload the student's coursework report",
-        type=['docx', 'pdf'],
-        help="Upload the student's submission in DOCX or PDF format",
-        label_visibility="collapsed"
-    )
-    
-    if uploaded_file:
-        if (st.session_state.report_data is None or 
-            st.session_state.report_data.get('filename') != uploaded_file.name):
-            
-            with st.spinner("Processing report..."):
-                report_data = process_report(uploaded_file)
-                
-                if report_data:
-                    st.session_state.report_data = report_data
-                    st.session_state.feedback_generated = False
-                    st.session_state.feedback_results = None
+    with col1:
+        st.markdown("## 📄 Upload Report")
+        uploaded_file = st.file_uploader("Student report", type=['docx', 'pdf'])
         
-        if st.session_state.report_data:
-            report = st.session_state.report_data
+        if uploaded_file:
+            if st.session_state.report_data is None or st.session_state.report_data.get('filename') != uploaded_file.name:
+                with st.spinner("Processing..."):
+                    report_data = process_report(uploaded_file, image_processor)
+                    if report_data:
+                        st.session_state.report_data = report_data
+                        st.session_state.assessment_complete = False
             
-            st.markdown("""
-            <div style="margin: 1.5rem 0;">
-                <p style="color: #667eea; font-weight: 600; margin-bottom: 1rem;">📁 Document Loaded</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-label">Document</div>
-                    <div class="metric-value" style="font-size: 0.9rem; color: #e2e8f0;">{report['title'][:20]}...</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col2:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-label">Pages</div>
-                    <div class="metric-value">{report['total_pages']}</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col3:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-label">Chunks</div>
-                    <div class="metric-value">{len(report['chunks'])}</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col4:
-                stats = report.get('chunking_stats', {})
-                keywords_count = stats.get('chunks_with_keywords', 0)
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-label">With Keywords</div>
-                    <div class="metric-value">{keywords_count}</div>
-                </div>
-                """, unsafe_allow_html=True)
+            if st.session_state.report_data:
+                r = st.session_state.report_data
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Pages", r['total_pages'])
+                c2.metric("Chunks", len(r['chunks']))
+                c3.metric("Images", len(r.get('images', [])))
     
-    st.markdown("<br>", unsafe_allow_html=True)
+    with col2:
+        st.markdown("## 🤖 Agents")
+        display_agent_status(st.session_state.current_phase)
     
-    can_generate = (
-        st.session_state.report_data is not None and
-        st.session_state.ksb_criteria is not None and
-        st.session_state.ollama_connected and
-        st.session_state.embedder_loaded
-    )
+    # Run button
+    st.markdown("---")
     
-    if not can_generate:
-        st.markdown("""
-        <div style="background: #2d3748; padding: 1rem; border-radius: 10px; text-align: center;">
-            <p style="color: #a0aec0; margin: 0;">⚠️ Upload a report and ensure Ollama is connected to generate assessment.</p>
-        </div>
-        """, unsafe_allow_html=True)
+    can_run = (st.session_state.report_data and st.session_state.ksb_criteria and llm and embedder)
     
-    if st.button(
-        "🚀 Generate KSB Assessment",
-        type="primary",
-        disabled=not can_generate,
-        use_container_width=True
-    ):
-        # Get current search settings
-        search_settings = get_current_search_settings()
+    if st.button("🚀 Run Agentic Assessment", type="primary", disabled=not can_run, use_container_width=True):
+        progress_bar = st.progress(0, "Starting...")
+        status_placeholder = st.empty()
+        agent_placeholder = st.empty()
         
-        tmpdir = tempfile.mkdtemp()
-        vector_store = ChromaStore(persist_directory=tmpdir)
+        # Verbose mode log container
+        verbose_log = [] if st.session_state.verbose_mode else None
+        verbose_container = None
+        if st.session_state.verbose_mode:
+            verbose_container = st.expander("🔍 Verbose Log (Tool Calls)", expanded=True)
+            verbose_text = verbose_container.empty()
         
-        st.markdown("### 📥 Indexing Report")
-        success = index_report(
-            st.session_state.report_data,
-            embedder,
-            vector_store
-        )
+        def update_progress(msg, pct, phase):
+            st.session_state.current_phase = phase
+            progress_bar.progress(pct, msg)
+            with agent_placeholder:
+                display_agent_status(phase)
+            # Update verbose log display
+            if verbose_log and verbose_container:
+                verbose_text.code("\n".join(verbose_log[-30:]), language="text")
         
-        if success:
-            st.markdown("### 🤖 Evaluating Against KSBs")
-            
-            # Show search config being used
-            st.info(
-                f"Using **{st.session_state.search_preset}** search: "
-                f"{'Hybrid' if search_settings['use_hybrid'] else 'Semantic'} "
-                f"(S:{int(search_settings['semantic_weight']*100)}% / K:{int(search_settings['keyword_weight']*100)}%) | "
-                f"Threshold: {search_settings['similarity_threshold']} | "
-                f"Top-K: {search_settings['report_top_k']}"
-            )
-            
-            results = generate_feedback(
+        try:
+            results = run_agent_pipeline(
+                st.session_state.report_data,
                 st.session_state.ksb_criteria,
-                embedder,
-                vector_store,
-                llm,
-                search_settings
+                st.session_state.assignment_brief,
+                llm, embedder, update_progress,
+                verbose_log=verbose_log
             )
             
-            if results:
-                st.session_state.feedback_results = results
-                st.session_state.feedback_generated = True
-                st.rerun()
+            st.session_state.agent_results = results
+            st.session_state.assessment_complete = True
+            st.session_state.current_phase = "complete"
+            
+            # Final verbose log
+            if verbose_log and verbose_container:
+                verbose_text.code("\n".join(verbose_log), language="text")
+            
+            st.rerun()
+            
+        except Exception as e:
+            logger.exception("Pipeline error")
+            st.error(f"Error: {str(e)}")
     
     # Display results
-    if st.session_state.get('feedback_generated') and st.session_state.get('feedback_results'):
-        st.divider()
-        display_feedback(st.session_state.feedback_results)
+    if st.session_state.assessment_complete and st.session_state.agent_results:
+        st.markdown("---")
+        display_results(st.session_state.agent_results)
         
-        st.divider()
-        st.markdown("### 💾 Export Assessment")
+        # Export
+        st.markdown("### 💾 Export")
+        col1, col2 = st.columns(2)
         
-        module_code = st.session_state.selected_module
-        module_info = AVAILABLE_MODULES.get(module_code, {})
-        module_name = module_info.get('name', module_code)
+        with col1:
+            md = f"# Assessment Report\n\n{st.session_state.agent_results.get('overall_feedback', '')}\n\n"
+            for fb in st.session_state.agent_results.get("feedback_results", []):
+                md += fb.get("formatted_feedback", "") + "\n\n"
+            st.download_button("📄 Feedback (MD)", md, f"feedback_{st.session_state.selected_module}_{time.strftime('%Y%m%d')}.md", "text/markdown")
         
-        # Include search settings in export
-        search_settings = st.session_state.feedback_results.get('search_settings', {})
-        
-        export_text = f"# KSB Coursework Assessment Report\n\n"
-        export_text += f"**Module:** {module_name}\n\n"
-        export_text += f"**Date:** {time.strftime('%Y-%m-%d %H:%M')}\n\n"
-        export_text += f"**Search Configuration:**\n"
-        export_text += f"- Mode: {'Hybrid (BM25 + Semantic)' if search_settings.get('use_hybrid', True) else 'Semantic Only'}\n"
-        export_text += f"- Semantic Weight: {search_settings.get('semantic_weight', 0.6)}\n"
-        export_text += f"- Keyword Weight: {search_settings.get('keyword_weight', 0.4)}\n"
-        export_text += f"- Similarity Threshold: {search_settings.get('similarity_threshold', 0.2)}\n"
-        export_text += f"- Results per KSB: {search_settings.get('report_top_k', 8)}\n\n"
-        
-        export_text += "---\n\n## KSB Grade Summary\n\n"
-        export_text += "| KSB | Title | Grade | Evidence |\n"
-        export_text += "|-----|-------|-------|----------|\n"
-        for eval_data in st.session_state.feedback_results.get('ksb_evaluations', []):
-            export_text += f"| {eval_data['ksb_code']} | {eval_data['ksb_title'][:35]}... | {eval_data['grade']} | {eval_data.get('evidence_count', 0)} chunks |\n"
-        
-        export_text += "\n\n## Overall Assessment\n\n"
-        export_text += st.session_state.feedback_results.get('overall_summary', '') + "\n\n"
-        
-        for eval_data in st.session_state.feedback_results.get('ksb_evaluations', []):
-            export_text += f"---\n\n## {eval_data['ksb_code']} - {eval_data['ksb_title']}\n\n"
-            export_text += f"**Grade: {eval_data['grade']}** | "
-            export_text += f"Evidence: {eval_data.get('evidence_count', 0)} chunks | "
-            export_text += f"Search: {eval_data.get('search_strategy', 'N/A')}\n\n"
-            export_text += eval_data.get('evaluation', '') + "\n\n"
-        
-        filename = f"ksb_assessment_{module_code.lower()}_{time.strftime('%Y%m%d')}.md"
-        
-        st.download_button(
-            label="📥 Download Assessment (Markdown)",
-            data=export_text,
-            file_name=filename,
-            mime="text/markdown"
-        )
+        with col2:
+            st.download_button("📊 Full Report (JSON)", json.dumps(st.session_state.agent_results, indent=2, default=str),
+                             f"assessment_{st.session_state.selected_module}_{time.strftime('%Y%m%d')}.json", "application/json")
 
 
 if __name__ == "__main__":
