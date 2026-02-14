@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import sys
 import json
+import csv
+from io import StringIO
+from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -110,35 +113,56 @@ def load_image_processor():
 
 
 def process_report(uploaded_file, image_processor=None) -> Optional[Dict[str, Any]]:
+    """Process uploaded report with input validation."""
     if uploaded_file is None:
         return None
-    
+
     try:
         suffix = Path(uploaded_file.name).suffix.lower()
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(uploaded_file.getvalue())
             tmp_path = tmp.name
-        
+
         processor = DocxProcessor() if suffix == '.docx' else PDFProcessor()
         doc = processor.process(tmp_path)
-        
+
+        # Validate document content length
+        raw_text = getattr(doc, 'raw_text', '')
+        if len(raw_text.strip()) < 200:
+            st.warning("⚠️ Document appears too short to assess (less than 200 characters). Please check the upload.")
+            logger.warning(f"Document too short: {len(raw_text)} characters")
+            # Clean up temp file
+            try:
+                Path(tmp_path).unlink()
+            except:
+                pass
+            return None
+
         chunker = SmartChunker()
         chunks = chunker.chunk_report(doc.chunks, document_id="report")
-        
+
+        # Validate chunk count
+        if len(chunks) < 3:
+            st.warning(f"⚠️ Document produced very few text sections ({len(chunks)} chunks). Results may be unreliable.")
+            logger.warning(f"Low chunk count: {len(chunks)}")
+
         images = []
         if image_processor:
             if suffix == '.docx' and hasattr(doc, 'figures') and doc.figures:
                 images = image_processor.process_docx_images(doc.figures, getattr(doc, 'figure_captions', {}))
             elif suffix == '.pdf':
                 images = image_processor.process_pdf_images(tmp_path)
-        
+
+        # Get page count correctly for both PDF (total_pages) and DOCX (total_pages_estimate)
+        total_pages = getattr(doc, 'total_pages', None) or getattr(doc, 'total_pages_estimate', 1)
+
         return {
             'chunks': [c.to_dict() if hasattr(c, 'to_dict') else c for c in chunks],
             'title': doc.title or uploaded_file.name,
             'filename': uploaded_file.name,
-            'total_pages': getattr(doc, 'total_pages', 1) or getattr(doc, 'total_pages_estimate', 1),
+            'total_pages': total_pages,
             'pages_are_accurate': getattr(doc, 'pages_are_accurate', suffix == '.pdf'),
-            'raw_text': doc.raw_text,
+            'raw_text': raw_text,
             'images': images,
             'tmp_path': tmp_path
         }
@@ -194,11 +218,12 @@ def display_agent_status(phase: str):
 
 
 def run_agent_pipeline(report_data, ksb_criteria, assignment_brief, llm, embedder, progress_callback, verbose_log=None):
-    """Run the three-agent pipeline."""
-    
+    """Run the three-agent pipeline with proper resource cleanup."""
+    import shutil
+
     # Import here to set verbose callback
     from src.agents.core import BaseAgent
-    
+
     # Set up verbose callback if log container provided
     if verbose_log is not None:
         def verbose_callback(agent, message, data=None):
@@ -206,79 +231,218 @@ def run_agent_pipeline(report_data, ksb_criteria, assignment_brief, llm, embedde
         BaseAgent.verbose_callback = verbose_callback
     else:
         BaseAgent.verbose_callback = None
-    
-    # Create vector store and index
+
+    # Create vector store with temp directory (will be cleaned up in finally block)
     tmpdir = tempfile.mkdtemp()
-    vector_store = ChromaStore(persist_directory=tmpdir)
-    
-    progress_callback("Indexing report...", 0.05, "analysis")
-    report_texts = [c.get('content', '') for c in report_data['chunks']]
-    report_embeddings = embedder.embed_documents(report_texts)
-    vector_store.add_report(report_data['chunks'], report_embeddings)
-    
-    if verbose_log is not None:
-        verbose_log.append(f"[INDEX] Indexed {len(report_data['chunks'])} chunks")
-    
-    # Create agent system
-    orchestrator = create_agent_system(
-        llm=llm,
-        embedder=embedder,
-        vector_store=vector_store,
-        verbose=st.session_state.verbose_mode
-    )
-    
-    # Convert KSB criteria
-    ksb_list = []
-    for ksb in ksb_criteria:
-        if hasattr(ksb, 'code'):
-            ksb_list.append({
-                'code': ksb.code,
-                'title': ksb.title,
-                'pass_criteria': ksb.pass_criteria,
-                'merit_criteria': ksb.merit_criteria,
-                'referral_criteria': ksb.referral_criteria,
-                'category': ksb.category
-            })
+    vector_store = None
+    orchestrator = None
+    results = None
+
+    try:
+        vector_store = ChromaStore(persist_directory=tmpdir)
+
+        progress_callback("Indexing report...", 0.05, "analysis")
+        report_texts = [c.get('content', '') for c in report_data['chunks']]
+        report_embeddings = embedder.embed_documents(report_texts)
+        vector_store.add_report(report_data['chunks'], report_embeddings)
+
+        if verbose_log is not None:
+            verbose_log.append(f"[INDEX] Indexed {len(report_data['chunks'])} chunks")
+
+        # Create agent system
+        orchestrator = create_agent_system(
+            llm=llm,
+            embedder=embedder,
+            vector_store=vector_store,
+            verbose=st.session_state.verbose_mode,
+            module_code=st.session_state.selected_module
+        )
+
+        # Convert KSB criteria
+        ksb_list = []
+        for ksb in ksb_criteria:
+            if hasattr(ksb, 'code'):
+                ksb_list.append({
+                    'code': ksb.code,
+                    'title': ksb.title,
+                    'pass_criteria': ksb.pass_criteria,
+                    'merit_criteria': ksb.merit_criteria,
+                    'referral_criteria': ksb.referral_criteria,
+                    'category': ksb.category
+                })
+            else:
+                ksb_list.append(ksb)
+
+        # Convert brief
+        brief_dict = None
+        if assignment_brief:
+            brief_dict = assignment_brief.to_dict() if hasattr(assignment_brief, 'to_dict') else assignment_brief
+
+        # Convert images
+        images = []
+        for img in report_data.get('images', []):
+            if hasattr(img, 'image_id'):
+                images.append({
+                    'image_id': img.image_id,
+                    'caption': getattr(img, 'caption', ''),
+                    'base64': getattr(img, 'base64_data', '')
+                })
+            elif isinstance(img, dict):
+                images.append(img)
+
+        # Run pipeline with progress callbacks
+        def agent_progress(msg, pct):
+            if "Analysis" in msg:
+                progress_callback(msg, pct, "analysis")
+            elif "Scoring" in msg:
+                progress_callback(msg, pct, "scoring")
+            elif "Feedback" in msg:
+                progress_callback(msg, pct, "feedback")
+            else:
+                progress_callback(msg, pct, "complete")
+
+        results = orchestrator.process(
+            chunks=report_data['chunks'],
+            ksb_criteria=ksb_list,
+            assignment_brief=brief_dict,
+            images=images,
+            progress_callback=agent_progress
+        )
+
+        return results
+
+    finally:
+        # Clean up temporary ChromaDB directory
+        if tmpdir and Path(tmpdir).exists():
+            try:
+                # Release ChromaDB file locks (Windows file locking issue)
+                try:
+                    del vector_store
+                    import gc
+                    gc.collect()
+                    import time
+                    time.sleep(0.5)  # Give Windows time to release file handles
+                except:
+                    pass
+
+                shutil.rmtree(tmpdir)
+                if verbose_log is not None:
+                    verbose_log.append(f"[CLEANUP] Removed temp directory: {tmpdir}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp directory {tmpdir}: {e}")
+
+        # Clean up uploaded file temp path
+        if report_data and 'tmp_path' in report_data:
+            tmp_path = report_data['tmp_path']
+            if tmp_path and Path(tmp_path).exists():
+                try:
+                    Path(tmp_path).unlink()
+                    if verbose_log is not None:
+                        verbose_log.append(f"[CLEANUP] Removed temp file: {tmp_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temp file {tmp_path}: {e}")
+
+
+def export_results_to_csv(results: Dict[str, Any], module_code: str = "MLCC") -> str:
+    """
+    Convert assessment results to CSV format.
+
+    Args:
+        results: Assessment results from agent pipeline
+        module_code: Module code for filename
+
+    Returns:
+        CSV string ready for download
+    """
+    output = StringIO()
+    writer = csv.writer(output)
+
+    # Header row
+    writer.writerow([
+        "KSB Code",
+        "KSB Title",
+        "Grade",
+        "Confidence",
+        "Weighted Score",
+        "Pass Criteria Met",
+        "Merit Criteria Met",
+        "Rationale",
+        "Key Strengths",
+        "Gaps Identified",
+        "Improvement Suggestions"
+    ])
+
+    # Get scoring and feedback results
+    scoring_results = results.get("scoring_results", [])
+    feedback_results = results.get("feedback_results", [])
+
+    # Write data rows
+    for sr in scoring_results:
+        ksb_code = sr.get("ksb_code", "")
+
+        # Find corresponding feedback
+        fb = next((f for f in feedback_results if f.get("ksb_code") == ksb_code), {})
+
+        # Extract strengths (from feedback)
+        strengths = fb.get("strengths", [])
+        strengths_text = " | ".join(str(s) for s in strengths[:3]) if strengths else ""
+
+        # Extract gaps
+        gaps = sr.get("gaps_identified", [])
+        gaps_text = " | ".join(str(g) for g in gaps[:5]) if gaps else ""
+
+        # Extract improvements (from feedback)
+        improvements = fb.get("improvements", [])
+        if improvements:
+            # Handle both dict and string formats
+            imp_texts = []
+            for imp in improvements[:3]:
+                if isinstance(imp, dict):
+                    imp_texts.append(imp.get("suggestion", str(imp)))
+                else:
+                    imp_texts.append(str(imp))
+            improvements_text = " | ".join(imp_texts)
         else:
-            ksb_list.append(ksb)
-    
-    # Convert brief
-    brief_dict = None
-    if assignment_brief:
-        brief_dict = assignment_brief.to_dict() if hasattr(assignment_brief, 'to_dict') else assignment_brief
-    
-    # Convert images
-    images = []
-    for img in report_data.get('images', []):
-        if hasattr(img, 'image_id'):
-            images.append({
-                'image_id': img.image_id,
-                'caption': getattr(img, 'caption', ''),
-                'base64': getattr(img, 'base64_data', '')
-            })
-        elif isinstance(img, dict):
-            images.append(img)
-    
-    # Run pipeline with progress callbacks
-    def agent_progress(msg, pct):
-        if "Analysis" in msg:
-            progress_callback(msg, pct, "analysis")
-        elif "Scoring" in msg:
-            progress_callback(msg, pct, "scoring")
-        elif "Feedback" in msg:
-            progress_callback(msg, pct, "feedback")
-        else:
-            progress_callback(msg, pct, "complete")
-    
-    results = orchestrator.process(
-        chunks=report_data['chunks'],
-        ksb_criteria=ksb_list,
-        assignment_brief=brief_dict,
-        images=images,
-        progress_callback=agent_progress
-    )
-    
-    return results
+            improvements_text = ""
+
+        writer.writerow([
+            ksb_code,
+            sr.get("ksb_title", ""),
+            sr.get("grade", ""),
+            sr.get("confidence", ""),
+            sr.get("weighted_score", 0),
+            sr.get("pass_met", ""),
+            sr.get("merit_met", ""),
+            sr.get("rationale", ""),
+            strengths_text,
+            gaps_text,
+            improvements_text
+        ])
+
+    # Add summary row
+    writer.writerow([])  # Empty row
+    summary = results.get("overall_summary", {})
+    writer.writerow(["OVERALL SUMMARY"])
+    writer.writerow(["Total KSBs", summary.get("total_ksbs", 0)])
+    writer.writerow(["Merit Count", summary.get("merit_count", 0)])
+    writer.writerow(["Pass Count", summary.get("pass_count", 0)])
+    writer.writerow(["Referral Count", summary.get("referral_count", 0)])
+    writer.writerow(["Overall Recommendation", summary.get("overall_recommendation", "")])
+    writer.writerow(["Confidence", summary.get("confidence", "")])
+
+    # Add key strengths
+    writer.writerow([])
+    writer.writerow(["KEY STRENGTHS"])
+    for strength in summary.get("key_strengths", [])[:5]:
+        writer.writerow(["", strength])
+
+    # Add priority improvements
+    writer.writerow([])
+    writer.writerow(["PRIORITY IMPROVEMENTS"])
+    for improvement in summary.get("priority_improvements", [])[:5]:
+        writer.writerow(["", improvement])
+
+    return output.getvalue()
 
 
 def display_results(results: Dict[str, Any]):
@@ -308,23 +472,69 @@ def display_results(results: Dict[str, Any]):
         <span style="color: #8b95a5; margin-left: 0.5rem;">Overall Recommendation</span>
     </div>
     """, unsafe_allow_html=True)
-    
-    # Overall feedback
-    if results.get("overall_feedback"):
-        with st.expander("📝 Overall Feedback", expanded=True):
-            st.markdown(results["overall_feedback"])
-    
-    # Key strengths and improvements
-    col1, col2 = st.columns(2)
+
+    # Download Buttons
+    st.markdown("---")
+    st.markdown("### 💾 Export Results")
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+
     with col1:
-        st.markdown("### 💪 Key Strengths")
-        for s in summary.get("key_strengths", [])[:5]:
-            st.markdown(f"- {s}")
+        # Generate CSV
+        csv_data = export_results_to_csv(results, st.session_state.get("selected_module", "MLCC"))
+
+        # Create filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        module = st.session_state.get("selected_module", "MLCC")
+        csv_filename = f"ksb_assessment_{module}_{timestamp}.csv"
+
+        # CSV Download button
+        st.download_button(
+            label="📊 Download CSV",
+            data=csv_data,
+            file_name=csv_filename,
+            mime="text/csv",
+            help="Spreadsheet format with grades, feedback, and improvements",
+            use_container_width=True
+        )
+
     with col2:
-        st.markdown("### 📈 Priority Improvements")
-        for i in summary.get("priority_improvements", [])[:5]:
-            st.markdown(f"- {i}")
-    
+        # Generate JSON
+        json_data = json.dumps(results, indent=2, default=str)
+        json_filename = f"ksb_assessment_{module}_{timestamp}.json"
+
+        # JSON Download button
+        st.download_button(
+            label="📄 Download JSON",
+            data=json_data,
+            file_name=json_filename,
+            mime="application/json",
+            help="Complete raw data in JSON format for further processing",
+            use_container_width=True
+        )
+
+    with col3:
+        # Generate Markdown feedback
+        md = f"# Assessment Report\n\n{results.get('overall_feedback', '')}\n\n"
+        for fb in results.get("feedback_results", []):
+            md += fb.get("formatted_feedback", "") + "\n\n"
+
+        st.download_button(
+            label="📄 Download Markdown",
+            data=md,
+            file_name=f"feedback_{module}_{timestamp}.md",
+            mime="text/markdown",
+            help="Formatted feedback report in Markdown",
+            use_container_width=True
+        )
+
+    st.markdown("---")
+
+    # Overall feedback (includes key strengths, priority improvements, and next steps)
+    if results.get("overall_feedback"):
+        with st.expander("📝 Overall Assessment Summary", expanded=True):
+            st.markdown(results["overall_feedback"])
+
     # KSB Details
     st.markdown("## 📋 KSB Breakdown")
     
@@ -440,9 +650,17 @@ def main():
     
     # Run button
     st.markdown("---")
-    
+
+    # Validate prerequisites
     can_run = (st.session_state.report_data and st.session_state.ksb_criteria and llm and embedder)
-    
+
+    # Additional validation: check chunk count
+    if can_run and st.session_state.report_data:
+        chunks_count = len(st.session_state.report_data.get('chunks', []))
+        if chunks_count < 3:
+            can_run = False
+            st.error(f"⚠️ Document has too few sections ({chunks_count} chunks). Cannot assess reliably.")
+
     if st.button("🚀 Run Agentic Assessment", type="primary", disabled=not can_run, use_container_width=True):
         progress_bar = st.progress(0, "Starting...")
         status_placeholder = st.empty()
@@ -491,20 +709,6 @@ def main():
     if st.session_state.assessment_complete and st.session_state.agent_results:
         st.markdown("---")
         display_results(st.session_state.agent_results)
-        
-        # Export
-        st.markdown("### 💾 Export")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            md = f"# Assessment Report\n\n{st.session_state.agent_results.get('overall_feedback', '')}\n\n"
-            for fb in st.session_state.agent_results.get("feedback_results", []):
-                md += fb.get("formatted_feedback", "") + "\n\n"
-            st.download_button("📄 Feedback (MD)", md, f"feedback_{st.session_state.selected_module}_{time.strftime('%Y%m%d')}.md", "text/markdown")
-        
-        with col2:
-            st.download_button("📊 Full Report (JSON)", json.dumps(st.session_state.agent_results, indent=2, default=str),
-                             f"assessment_{st.session_state.selected_module}_{time.strftime('%Y%m%d')}.json", "application/json")
 
 
 if __name__ == "__main__":

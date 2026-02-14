@@ -65,12 +65,9 @@ class BaseTool:
     """Base class for agent tools."""
     name: str = "base_tool"
     description: str = "Base tool"
-    
+
     def execute(self, context: AgentContext, **kwargs) -> ToolResult:
         raise NotImplementedError
-    
-    def get_schema(self) -> Dict[str, Any]:
-        return {"name": self.name, "description": self.description}
 
 
 class BaseAgent:
@@ -157,8 +154,12 @@ class AgentOrchestrator:
         images: List[Any] = None,
         progress_callback=None
     ) -> Dict[str, Any]:
-        """Run the full pipeline."""
-        
+        """Run the full pipeline with error handling and graceful degradation."""
+        import time
+
+        errors = []
+        warnings = []
+
         # Initialize context
         context = AgentContext(
             chunks=chunks,
@@ -166,30 +167,112 @@ class AgentOrchestrator:
             ksb_criteria=ksb_criteria,
             assignment_brief=assignment_brief
         )
-        
-        # Phase 1: Analysis
-        if progress_callback:
-            progress_callback("Analysis Agent: Processing sections...", 0.1)
-        logger.info("Phase 1: Analysis Agent")
-        context = self.analysis_agent.process(context)
-        
-        # Phase 2: Scoring
-        if progress_callback:
-            progress_callback("Scoring Agent: Applying rubric...", 0.4)
-        logger.info("Phase 2: Scoring Agent")
-        context = self.scoring_agent.process(context)
-        
-        # Phase 3: Feedback
-        if progress_callback:
-            progress_callback("Feedback Agent: Generating feedback...", 0.7)
-        logger.info("Phase 3: Feedback Agent")
-        context = self.feedback_agent.process(context)
-        
+
+        # Phase 1: Analysis Agent (CRITICAL - if this fails, can't continue)
+        try:
+            if progress_callback:
+                progress_callback("Analysis Agent: Processing sections...", 0.1)
+            logger.info("Phase 1: Analysis Agent")
+
+            start_time = time.time()
+            context = self.analysis_agent.process(context)
+            duration = time.time() - start_time
+
+            if duration > 600:  # 10 minutes
+                warnings.append(f"Analysis agent took {duration/60:.1f} minutes (unusually long)")
+
+            logger.info(f"Analysis complete in {duration:.1f}s")
+
+        except Exception as e:
+            logger.exception("Analysis Agent failed")
+            errors.append(f"Analysis Agent failed: {str(e)}")
+            return {
+                "analysis_results": [],
+                "scoring_results": [],
+                "feedback_results": [],
+                "overall_summary": {
+                    "total_ksbs": 0,
+                    "merit_count": 0,
+                    "pass_count": 0,
+                    "referral_count": 0,
+                    "overall_recommendation": "ERROR",
+                    "key_strengths": [],
+                    "priority_improvements": []
+                },
+                "overall_feedback": "",
+                "errors": errors,
+                "warnings": warnings,
+                "status": "FAILED_ANALYSIS"
+            }
+
+        # Phase 2: Scoring Agent (IMPORTANT - try to continue even if this fails)
+        try:
+            if progress_callback:
+                progress_callback("Scoring Agent: Applying rubric...", 0.4)
+            logger.info("Phase 2: Scoring Agent")
+
+            start_time = time.time()
+            context = self.scoring_agent.process(context)
+            duration = time.time() - start_time
+
+            if duration > 600:  # 10 minutes
+                warnings.append(f"Scoring agent took {duration/60:.1f} minutes (unusually long)")
+
+            logger.info(f"Scoring complete in {duration:.1f}s")
+
+        except Exception as e:
+            logger.exception("Scoring Agent failed")
+            errors.append(f"Scoring Agent failed: {str(e)}")
+            # Return analysis results at least
+            return {
+                "analysis_results": context.section_analyses,
+                "scoring_results": [],
+                "feedback_results": [],
+                "overall_summary": {
+                    "total_ksbs": len(ksb_criteria),
+                    "merit_count": 0,
+                    "pass_count": 0,
+                    "referral_count": 0,
+                    "overall_recommendation": "ERROR",
+                    "key_strengths": [],
+                    "priority_improvements": []
+                },
+                "overall_feedback": "Scoring failed - only analysis available",
+                "errors": errors,
+                "warnings": warnings,
+                "status": "FAILED_SCORING"
+            }
+
+        # Phase 3: Feedback Agent (NICE TO HAVE - return scores even if this fails)
+        try:
+            if progress_callback:
+                progress_callback("Feedback Agent: Generating feedback...", 0.7)
+            logger.info("Phase 3: Feedback Agent")
+
+            start_time = time.time()
+            context = self.feedback_agent.process(context)
+            duration = time.time() - start_time
+
+            if duration > 600:  # 10 minutes
+                warnings.append(f"Feedback agent took {duration/60:.1f} minutes (unusually long)")
+
+            logger.info(f"Feedback complete in {duration:.1f}s")
+
+        except Exception as e:
+            logger.exception("Feedback Agent failed")
+            errors.append(f"Feedback Agent failed: {str(e)}")
+            warnings.append("Feedback generation failed - grades and scores available")
+
         if progress_callback:
             progress_callback("Complete!", 1.0)
-        
-        # Compile results
-        return self._compile_results(context)
+
+        # Compile results (always returns valid dict even if some phases failed)
+        results = self._compile_results(context)
+        results["errors"] = errors
+        results["warnings"] = warnings
+        results["status"] = "COMPLETE" if not errors else "PARTIAL"
+
+        return results
     
     def _compile_results(self, context: AgentContext) -> Dict[str, Any]:
         """Compile final results from context."""

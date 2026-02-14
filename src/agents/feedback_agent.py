@@ -185,57 +185,6 @@ _{encouragement}_
         return ToolResult(self.name, True, {"formatted": formatted})
 
 
-class KSBFeedbackGeneratorTool(BaseTool):
-    """Generates complete feedback for a single KSB."""
-    name = "generate_ksb_feedback"
-    description = "Generate complete feedback for one KSB"
-    
-    def __init__(self, llm):
-        self.llm = llm
-    
-    def execute(self, context: AgentContext, ksb_code: str, ksb_title: str,
-                grade: str, score_data: Dict[str, Any]) -> ToolResult:
-        
-        gaps = score_data.get("gaps", [])
-        evidence_strength = score_data.get("evidence_strength", "adequate")
-        rationale = score_data.get("rationale", "")
-        
-        prompt = f"""Generate feedback for {ksb_code} - {ksb_title}.
-
-GRADE: {grade}
-EVIDENCE STRENGTH: {evidence_strength}
-RATIONALE: {rationale}
-GAPS: {gaps}
-
-Respond with ONLY a JSON object:
-{{
-    "summary": "one line grade summary",
-    "strengths": ["specific strengths"],
-    "improvements": ["specific improvement actions"],
-    "next_steps": ["concrete next steps"]
-}}"""
-
-        try:
-            response = self.llm.generate(prompt, temperature=0.4, max_tokens=500)
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                return ToolResult(self.name, True, json.loads(json_match.group()))
-            return ToolResult(self.name, True, {
-                "summary": f"{grade} - {rationale}",
-                "strengths": [],
-                "improvements": gaps,
-                "next_steps": []
-            })
-        except Exception as e:
-            return ToolResult(self.name, True, {
-                "summary": f"{grade}",
-                "strengths": [],
-                "improvements": gaps,
-                "next_steps": [],
-                "error": str(e)
-            })
-
-
 class FeedbackAgent(BaseAgent):
     """Feedback Agent - Personalized feedback generation."""
     
@@ -244,8 +193,7 @@ class FeedbackAgent(BaseAgent):
             StrengthIdentifierTool(llm),
             GapAnalyzerTool(llm),
             ImprovementSuggesterTool(),
-            FeedbackFormatterTool(),
-            KSBFeedbackGeneratorTool(llm)
+            FeedbackFormatterTool()
         ]
         super().__init__(llm, AgentRole.FEEDBACK, tools, verbose)
     
@@ -257,8 +205,7 @@ class FeedbackAgent(BaseAgent):
         strength_tool = self.tools["identify_strengths"]
         gap_tool = self.tools["analyze_gaps"]
         format_tool = self.tools["format_feedback"]
-        ksb_gen = self.tools["generate_ksb_feedback"]
-        
+
         all_strengths = []
         all_improvements = []
         
@@ -345,14 +292,25 @@ class FeedbackAgent(BaseAgent):
         passes = patterns.get("passing", 0) - patterns.get("merits", 0)
         referrals = patterns.get("referrals", 0)
         total = patterns.get("total", 0)
-        
-        # Opening based on grade
+
+        # Calculate percentages for context
+        merit_pct = (merits / total * 100) if total > 0 else 0
+        pass_pct = (passes / total * 100) if total > 0 else 0
+        referral_pct = (referrals / total * 100) if total > 0 else 0
+
+        # Create detailed opening based on grade distribution
         if recommendation == "MERIT":
-            opening = "Congratulations on achieving an overall Merit grade! Your work demonstrates strong understanding across multiple areas."
+            opening = f"**Congratulations on achieving an overall Merit grade!** Your work demonstrates strong understanding across multiple areas. You achieved Merit in {merits} KSBs ({merit_pct:.0f}%) with solid Pass grades in {passes} additional criteria."
         elif recommendation == "PASS":
-            opening = "Well done on achieving an overall Pass grade. Your work meets the required standards with room for development."
+            if referrals == 0:
+                opening = f"**Well done on achieving an overall Pass grade.** Your work meets the required standards across all {total} KSBs, with {merits} Merit grades ({merit_pct:.0f}%) demonstrating particular strength. Focus on deepening your evidence to achieve more Merits."
+            else:
+                opening = f"**Your work meets the Pass standard overall**, though improvement is needed in {referrals} area{'s' if referrals != 1 else ''}. You achieved {passes} Pass grades and {merits} Merits, demonstrating solid understanding in {passes + merits} KSBs ({(passes + merits) / total * 100:.0f}%)."
         else:
-            opening = "Your work shows potential but requires further development to meet all criteria."
+            if referrals == total:
+                opening = f"**Your submission requires significant development** to meet the required standards. Currently, all {total} KSBs require further work. This indicates missing evidence or insufficient depth across the assessment criteria."
+            else:
+                opening = f"**Your work shows potential but requires further development.** While you achieved {passes + merits} passing grades ({(passes + merits) / total * 100:.0f}%), {referrals} KSBs ({referral_pct:.0f}%) need additional evidence to meet the Pass criteria. Focus on addressing the gaps identified below."
         
         summary = f"""# Overall Assessment Feedback
 

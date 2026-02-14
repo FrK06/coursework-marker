@@ -15,6 +15,7 @@ from typing import Dict, Any, List, Optional
 import logging
 
 from .core import BaseAgent, BaseTool, AgentContext, AgentRole, ToolResult
+from ..retrieval.retriever import Retriever, QueryExpander
 
 logger = logging.getLogger(__name__)
 
@@ -232,53 +233,108 @@ class SectionExtractorTool(BaseTool):
 
 
 class EvidenceFinderTool(BaseTool):
-    """Finds evidence for KSB requirements using vector search."""
+    """Finds evidence for KSB requirements using hybrid search (BM25 + semantic)."""
     name = "find_evidence"
-    description = "Search for evidence matching a KSB requirement"
-    
-    def __init__(self, embedder=None, vector_store=None):
+    description = "Search for evidence matching a KSB requirement using hybrid search"
+
+    def __init__(self, embedder=None, vector_store=None, retriever=None):
         self.embedder = embedder
         self.vector_store = vector_store
-    
+        self.retriever = retriever
+
     def execute(self, context: AgentContext, ksb_code: str, requirement: str) -> ToolResult:
+        # Prefer Retriever if available (hybrid search)
+        if self.retriever:
+            try:
+                # Use the battle-tested hybrid search from Retriever
+                retrieval_result = self.retriever.retrieve_for_criterion(
+                    requirement, ksb_code
+                )
+
+                # Extract evidence from RetrievalResult
+                evidence = [{
+                    "content": chunk.get("content", "")[:400],
+                    "section": chunk.get("metadata", {}).get("section_title", "Unknown"),
+                    "relevance": chunk.get("similarity", 0),
+                    "chunk_id": chunk.get("chunk_id", "")
+                } for chunk in retrieval_result.retrieved_chunks[:10]]  # Up to 10 results
+
+                return ToolResult(self.name, True, {
+                    "ksb_code": ksb_code,
+                    "found": len(evidence) > 0,
+                    "evidence": evidence,
+                    "search_strategy": retrieval_result.search_strategy,
+                    "query_variations": len(retrieval_result.query_variations)
+                })
+            except Exception as e:
+                logger.warning(f"Retriever failed for {ksb_code}, falling back to simple search: {e}")
+                # Fall through to simple search
+
+        # Fallback: Simple semantic search
         if self.embedder and self.vector_store:
             try:
+                from config import RetrievalConfig
                 query = f"{ksb_code} {requirement}"
                 query_embedding = self.embedder.embed_query(query)
-                results = self.vector_store.query_report(query_embedding, n_results=5)
-                
+                results = self.vector_store.query_report(
+                    query_embedding,
+                    n_results=RetrievalConfig.REPORT_TOP_K  # Use config instead of hardcoded 5
+                )
+
                 evidence = [{
                     "content": r.get("content", "")[:400],
                     "section": r.get("metadata", {}).get("section_title", "Unknown"),
                     "relevance": r.get("similarity", 0)
                 } for r in results]
-                
+
                 return ToolResult(self.name, True, {
                     "ksb_code": ksb_code,
                     "found": len(evidence) > 0,
-                    "evidence": evidence
+                    "evidence": evidence,
+                    "search_strategy": "semantic_only"
                 })
             except Exception as e:
                 return ToolResult(self.name, False, {"ksb_code": ksb_code}, str(e))
-        
+
         return ToolResult(self.name, True, {"ksb_code": ksb_code, "found": False, "evidence": []})
 
 
 class AnalysisAgent(BaseAgent):
     """Analysis Agent - Multimodal document analysis."""
-    
+
     def __init__(self, llm, embedder=None, vector_store=None, verbose: bool = False):
+        # Build Retriever if embedder and vector_store are available
+        retriever = None
+        if embedder and vector_store:
+            try:
+                from config import RetrievalConfig
+                retriever = Retriever(
+                    embedder=embedder,
+                    vector_store=vector_store,
+                    criteria_top_k=RetrievalConfig.CRITERIA_TOP_K,
+                    report_top_k=RetrievalConfig.REPORT_TOP_K,
+                    max_context_tokens=RetrievalConfig.MAX_CONTEXT_TOKENS,
+                    similarity_threshold=RetrievalConfig.SIMILARITY_THRESHOLD,
+                    use_hybrid=RetrievalConfig.USE_HYBRID_SEARCH,
+                    semantic_weight=RetrievalConfig.SEMANTIC_WEIGHT,
+                    keyword_weight=RetrievalConfig.KEYWORD_WEIGHT
+                )
+                logger.info("Retriever initialized with hybrid search enabled")
+            except Exception as e:
+                logger.warning(f"Failed to build Retriever, using simple search: {e}")
+
         tools = [
             TextAnalyzerTool(llm),
             ChartAnalyzerTool(llm),
             TableAnalyzerTool(llm),
             ImageAnalyzerTool(llm),
             SectionExtractorTool(),
-            EvidenceFinderTool(embedder, vector_store)
+            EvidenceFinderTool(embedder, vector_store, retriever)
         ]
         super().__init__(llm, AgentRole.ANALYSIS, tools, verbose)
         self.embedder = embedder
         self.vector_store = vector_store
+        self.retriever = retriever
     
     def process(self, context: AgentContext) -> AgentContext:
         """Analyze all document content."""
@@ -300,11 +356,17 @@ class AnalysisAgent(BaseAgent):
         # Get KSB codes list
         ksb_codes = [k.get("code", "") for k in context.ksb_criteria]
         
-        for section in sections[:20]:  # Limit sections
+        # Cap at 15 sections (down from 20) - last sections usually references/appendices
+        for section in sections[:15]:
             section_id = section["section_id"]
             content = section["content"]
             title = section["title"]
-            
+
+            # Skip very short sections (likely empty headers or page breaks)
+            if len(content.strip()) < 50:
+                self._log_verbose(f"Skipping short section {section_id} ({len(content)} chars)")
+                continue
+
             # Find relevant KSBs from brief
             relevant_ksbs = []
             if context.assignment_brief:
@@ -312,7 +374,7 @@ class AnalysisAgent(BaseAgent):
                     if section["content_type"] in task.get("description", "").lower():
                         relevant_ksbs = task.get("mapped_ksbs", [])[:3]
                         break
-            
+
             if section["chunk_type"] == "table":
                 self._log_tool_call("analyze_table", {"section_id": section_id})
                 result = table_analyzer.execute(context, section_id, content, title)
@@ -329,30 +391,46 @@ class AnalysisAgent(BaseAgent):
                     result.data["content_type"] = section["content_type"]
                     result.data["ksb_mappings"] = relevant_ksbs
                     context.section_analyses.append(result.data)
-        
+
         self._log_verbose(f"Analyzed {len(context.section_analyses)} text sections, {len(context.table_analyses)} tables")
-        
-        # Step 3: Analyze images
-        image_analyzer = self.tools["analyze_image"]
-        for img in context.images[:10]:
-            if hasattr(img, 'image_id'):
-                img_data = {"image_id": img.image_id, "caption": getattr(img, 'caption', ''),
-                           "base64": getattr(img, 'base64_data', '')}
+
+        # Step 3: Analyze images (ONLY if images exist and have base64 data)
+        if context.images:
+            image_analyzer = self.tools["analyze_image"]
+            images_with_data = []
+
+            # Filter images that have base64 data (required for vision models)
+            for img in context.images[:10]:
+                if hasattr(img, 'image_id'):
+                    img_data = {"image_id": img.image_id, "caption": getattr(img, 'caption', ''),
+                               "base64": getattr(img, 'base64_data', '')}
+                else:
+                    img_data = img
+
+                # Only analyze if base64 data exists
+                if img_data.get("base64"):
+                    images_with_data.append(img_data)
+
+            if images_with_data:
+                self._log_verbose(f"Analyzing {len(images_with_data)} images with base64 data")
+                for img_data in images_with_data:
+                    result = image_analyzer.execute(
+                        context,
+                        img_data.get("image_id", "unknown"),
+                        "diagram",
+                        img_data.get("caption", ""),
+                        img_data.get("base64", None)
+                    )
+                    if result.success:
+                        context.image_analyses.append(result.data)
             else:
-                img_data = img
-            
-            result = image_analyzer.execute(
-                context,
-                img_data.get("image_id", "unknown"),
-                "diagram",
-                img_data.get("caption", ""),
-                img_data.get("base64", None)
-            )
-            if result.success:
-                context.image_analyses.append(result.data)
+                self._log_verbose("Skipping image analysis - no base64 data available")
         
         # Step 4: Find evidence for each KSB
         evidence_finder = self.tools["find_evidence"]
+        search_mode = "hybrid" if self.retriever else "semantic-only"
+        self._log_verbose(f"Evidence search mode: {search_mode}")
+
         for ksb in context.ksb_criteria:
             ksb_code = ksb.get("code", "")
             result = evidence_finder.execute(
@@ -360,6 +438,12 @@ class AnalysisAgent(BaseAgent):
             )
             if result.success:
                 context.evidence_map[ksb_code] = result.data.get("evidence", [])
+                search_strategy = result.data.get("search_strategy", "unknown")
+                query_variations = result.data.get("query_variations", 0)
+                self._log_verbose(
+                    f"  {ksb_code}: {len(result.data.get('evidence', []))} chunks found "
+                    f"({search_strategy}, {query_variations} query variations)"
+                )
         
         logger.info(f"Analysis complete: {len(context.section_analyses)} sections, "
                    f"{len(context.image_analyses)} images, "

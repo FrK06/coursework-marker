@@ -171,9 +171,12 @@ List 2-3 specific actions referencing the assignment brief:
 
 ════════════════════════════════════════════════════════════════════════════════
 
-⚠️ FINAL REMINDER: 
+⚠️ FINAL REMINDER:
 - Compare against BOTH the assignment brief AND the KSB criteria
-- If evidence is missing, grade as REFERRAL with confidence LOW
+- Grading guidance:
+  * CLEAR evidence meeting criteria → PASS or MERIT
+  * PARTIAL/IMPLICIT evidence showing some understanding → PASS (confidence LOW/MEDIUM)
+  * NO relevant evidence OR fundamentally wrong → REFERRAL
 - NEVER invent content - this is academic assessment requiring accuracy"""
 
     # Fallback template without brief (for backward compatibility)

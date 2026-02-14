@@ -54,28 +54,28 @@ from .feedback_agent import (
     GapAnalyzerTool,
     ImprovementSuggesterTool,
     FeedbackFormatterTool,
-    KSBFeedbackGeneratorTool,
     FEEDBACK_TEMPLATES
 )
 
 
-def create_agent_system(llm, embedder=None, vector_store=None, verbose: bool = False):
+def create_agent_system(llm, embedder=None, vector_store=None, verbose: bool = False, module_code: str = "MLCC"):
     """
     Factory function to create the complete three-agent system.
-    
+
     Args:
         llm: OllamaClient instance
         embedder: Optional Embedder for semantic search
         vector_store: Optional ChromaStore for evidence retrieval
         verbose: Enable verbose logging
-        
+        module_code: Module code for validation (DSP, MLCC, or AIDI)
+
     Returns:
         Configured AgentOrchestrator
     """
     analysis_agent = AnalysisAgent(llm, embedder, vector_store, verbose)
-    scoring_agent = ScoringAgent(llm, verbose)
+    scoring_agent = ScoringAgent(llm, module_code=module_code, verbose=verbose)
     feedback_agent = FeedbackAgent(llm, verbose)
-    
+
     return AgentOrchestrator(
         analysis_agent=analysis_agent,
         scoring_agent=scoring_agent,
@@ -117,7 +117,6 @@ __all__ = [
     'GapAnalyzerTool',
     'ImprovementSuggesterTool',
     'FeedbackFormatterTool',
-    'KSBFeedbackGeneratorTool',
     'FEEDBACK_TEMPLATES',
     
     # Factory

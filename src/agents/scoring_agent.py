@@ -12,6 +12,9 @@ from typing import Dict, Any, List
 import logging
 
 from .core import BaseAgent, BaseTool, AgentContext, AgentRole, ToolResult
+from ..validation.output_validator import OutputValidator
+from ..prompts.ksb_templates import KSBPromptTemplates, extract_grade_from_evaluation
+from config import ModelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -27,51 +30,95 @@ class RubricApplierTool(BaseTool):
     def execute(self, context: AgentContext, ksb_code: str, ksb_title: str,
                 pass_criteria: str, merit_criteria: str, referral_criteria: str,
                 evidence_summary: str, section_scores: Dict[str, float] = None) -> ToolResult:
-        
+
         section_scores = section_scores or {}
-        
-        prompt = f"""Apply the KSB rubric to evaluate this evidence.
 
-KSB: {ksb_code} - {ksb_title}
+        # Get brief context if available
+        brief_context = ""
+        if context.assignment_brief:
+            # Find tasks related to this KSB
+            tasks = context.assignment_brief.get("tasks", [])
+            for task in tasks:
+                mapped_ksbs = task.get("mapped_ksbs", [])
+                if ksb_code in mapped_ksbs:
+                    brief_context += f"**{task.get('task_title', '')}**: {task.get('description', '')}\n"
 
-PASS CRITERIA:
-{pass_criteria}
-
-MERIT CRITERIA:
-{merit_criteria}
-
-REFERRAL INDICATORS:
-{referral_criteria}
-
-EVIDENCE:
-{evidence_summary[:2000]}
-
-SECTION QUALITY SCORES: {json.dumps(section_scores)}
-
-Evaluate whether criteria are met. Respond with ONLY a JSON object:
-{{
-    "ksb_code": "{ksb_code}",
-    "pass_assessment": {{
-        "met": true|false,
-        "confidence": "high|medium|low",
-        "evidence_used": ["quotes used"]
-    }},
-    "merit_assessment": {{
-        "met": true|false,
-        "confidence": "high|medium|low",
-        "evidence_used": []
-    }},
-    "evidence_strength": "strong|adequate|weak",
-    "gaps": ["gaps identified"]
-}}"""
+        # Use mature template with anti-hallucination guards
+        prompt = KSBPromptTemplates.format_ksb_evaluation(
+            ksb_code=ksb_code,
+            ksb_title=ksb_title,
+            pass_criteria=pass_criteria,
+            merit_criteria=merit_criteria,
+            referral_criteria=referral_criteria,
+            evidence_text=evidence_summary[:3000],  # Increased from 2000
+            brief_context=brief_context if brief_context else ""
+        )
 
         try:
-            response = self.llm.generate(prompt, temperature=0.1, max_tokens=800)
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                return ToolResult(self.name, True, json.loads(json_match.group()))
-            return ToolResult(self.name, False, {"ksb_code": ksb_code}, "No JSON")
+            # Get model-specific configuration
+            model_config = ModelConfig.get_model_config(self.llm.model)
+
+            # Adjust system prompt based on model strictness tendencies
+            system_prompt = KSBPromptTemplates.get_system_prompt()
+            if model_config.get("strictness_adjustment") == "lenient":
+                # Add clarification for models that are too strict
+                system_prompt += """
+
+═══════════════════════════════════════════════════════════════════════════════
+⚠️  GRADING CALIBRATION NOTE
+═══════════════════════════════════════════════════════════════════════════════
+
+When evidence is PARTIAL or IMPLICIT:
+- If the student demonstrates understanding even if not perfectly articulated → PASS
+- Only use REFERRAL when evidence is clearly ABSENT or fundamentally wrong
+- "Evidence is weak but present" → PASS with LOW confidence, NOT REFERRAL
+
+The goal is fair assessment, not finding reasons to fail students.
+"""
+
+            # Use model-specific temperature and max_tokens
+            response = self.llm.generate(
+                prompt,
+                system_prompt=system_prompt,
+                temperature=model_config.get("temperature", 0.1),
+                max_tokens=model_config.get("max_tokens", 1500)
+            )
+
+            # Use robust grade extraction with 4 fallback methods
+            extracted = extract_grade_from_evaluation(response)
+
+            # Map to existing ToolResult format
+            data = {
+                "ksb_code": ksb_code,
+                "pass_assessment": {
+                    "met": extracted.get('pass_criteria_met', False),
+                    "confidence": extracted.get('confidence', 'medium').lower(),
+                    "evidence_used": extracted.get('brief_requirements_met', [])
+                },
+                "merit_assessment": {
+                    "met": extracted.get('merit_criteria_met', False),
+                    "confidence": extracted.get('confidence', 'medium').lower(),
+                    "evidence_used": []
+                },
+                "evidence_strength": "strong" if extracted.get('confidence') == 'HIGH' else "adequate" if extracted.get('confidence') == 'MEDIUM' else "weak",
+                "gaps": extracted.get('brief_requirements_missing', []),
+                "_raw_response": response,  # For validation
+                "_extraction_method": extracted.get('method', 'unknown'),
+                "_possible_hallucination": extracted.get('possible_hallucination', False)
+            }
+
+            # Override with parsed JSON if available
+            if extracted.get('raw_json'):
+                raw_json = extracted['raw_json']
+                data['pass_assessment']['met'] = raw_json.get('pass_criteria_met', data['pass_assessment']['met'])
+                data['merit_assessment']['met'] = raw_json.get('merit_criteria_met', data['merit_assessment']['met'])
+                if 'main_gap' in raw_json and raw_json['main_gap']:
+                    data['gaps'].append(raw_json['main_gap'])
+
+            return ToolResult(self.name, True, data)
+
         except Exception as e:
+            logger.error(f"RubricApplierTool failed for {ksb_code}: {e}")
             return ToolResult(self.name, False, {"ksb_code": ksb_code}, str(e))
 
 
@@ -204,8 +251,8 @@ class BriefMapperTool(BaseTool):
 
 class ScoringAgent(BaseAgent):
     """Scoring Agent - Rubric application and weighted scoring."""
-    
-    def __init__(self, llm, verbose: bool = False):
+
+    def __init__(self, llm, module_code: str = "MLCC", verbose: bool = False):
         tools = [
             RubricApplierTool(llm),
             WeightCalculatorTool(),
@@ -213,6 +260,8 @@ class ScoringAgent(BaseAgent):
             BriefMapperTool()
         ]
         super().__init__(llm, AgentRole.SCORING, tools, verbose)
+        self.validator = OutputValidator(module_code)
+        self.module_code = module_code
     
     def process(self, context: AgentContext) -> AgentContext:
         """Score all KSBs against rubric."""
@@ -254,7 +303,7 @@ class ScoringAgent(BaseAgent):
             if not evidence_summary:
                 evidence_summary = "No direct evidence found."
             
-            # Apply rubric
+            # Apply rubric (with validation and retry)
             self._log_tool_call("apply_rubric", {"ksb": ksb_code})
             result = rubric_tool.execute(
                 context,
@@ -267,7 +316,41 @@ class ScoringAgent(BaseAgent):
                 section_scores=section_scores
             )
             self._log_tool_call("apply_rubric", result=result)
-            
+
+            # Validate the LLM response
+            validation = None
+            if result.success and "_raw_response" in result.data:
+                raw_response = result.data.get("_raw_response", "")
+                validation = self.validator.validate_evaluation(
+                    raw_response, evidence_summary, ksb_code
+                )
+
+                self._log_verbose(
+                    f"Validation for {ksb_code}: {validation.suggested_action} "
+                    f"(confidence: {validation.confidence_score:.2f})"
+                )
+
+                # Handle validation results
+                if validation.suggested_action == 'reject':
+                    self._log_verbose(f"⚠️ Rejecting evaluation for {ksb_code}, retrying once...")
+                    # Retry once
+                    result = rubric_tool.execute(
+                        context,
+                        ksb_code=ksb_code,
+                        ksb_title=ksb.get("title", ""),
+                        pass_criteria=ksb.get("pass_criteria", ""),
+                        merit_criteria=ksb.get("merit_criteria", ""),
+                        referral_criteria=ksb.get("referral_criteria", ""),
+                        evidence_summary=evidence_summary,
+                        section_scores=section_scores
+                    )
+                    # Re-validate
+                    if result.success and "_raw_response" in result.data:
+                        validation = self.validator.validate_evaluation(
+                            result.data.get("_raw_response", ""), evidence_summary, ksb_code
+                        )
+                        self._log_verbose(f"Retry validation: {validation.suggested_action}")
+
             if result.success:
                 data = result.data
                 pass_met = data.get("pass_assessment", {}).get("met", False)
@@ -288,8 +371,9 @@ class ScoringAgent(BaseAgent):
                 # Calculate weighted score
                 avg_score = sum(section_scores.values()) / len(section_scores) if section_scores else 2.5
                 weighted = avg_score / 5
-                
-                context.ksb_scores[ksb_code] = {
+
+                # Build KSB score entry
+                ksb_score_entry = {
                     "ksb_title": ksb.get("title", ""),
                     "grade": grade,
                     "confidence": confidence,
@@ -300,6 +384,14 @@ class ScoringAgent(BaseAgent):
                     "gaps": data.get("gaps", []),
                     "rationale": f"Pass {'met' if pass_met else 'NOT met'}. Merit {'met' if merit_met else 'not met'}. Evidence: {evidence_strength}."
                 }
+
+                # Add validation warnings if flagged for review
+                if validation and validation.suggested_action == 'flag_for_review':
+                    ksb_score_entry["flagged"] = True
+                    ksb_score_entry["validation_warnings"] = validation.warnings
+                    self._log_verbose(f"⚠️ Flagged {ksb_code} for review: {len(validation.warnings)} warnings")
+
+                context.ksb_scores[ksb_code] = ksb_score_entry
             else:
                 context.ksb_scores[ksb_code] = {
                     "ksb_title": ksb.get("title", ""),

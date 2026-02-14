@@ -17,35 +17,13 @@ INDEX_DIR = DATA_DIR / "indexes"
 for dir_path in [CRITERIA_DIR, REPORTS_DIR, INDEX_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#                        MODEL RECOMMENDATIONS
-# ═══════════════════════════════════════════════════════════════════════════════
-# 
-# ⚠️  CRITICAL: For accurate academic marking, you need a capable model.
-# 
-# RECOMMENDED MODELS (in order of preference):
-# 
-# 1. Claude 3.5 Sonnet (API)     - Best accuracy, requires API key
-# 2. Llama 3.1 70B (local)       - Best local option, needs ~40GB VRAM
-# 3. Mistral 7B v0.3 (local)     - Minimum viable, needs ~8GB VRAM
-# 4. Llama 3.1 8B (local)        - Marginal, test carefully
-# 
-# NOT RECOMMENDED:
-# ❌ Gemma 3 4B                   - Too small, causes hallucinations
-# ❌ Any model < 7B parameters    - Insufficient reasoning capacity
-# 
-# ═══════════════════════════════════════════════════════════════════════════════
 
 # Ollama settings
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-# UPDATED: Default to a more capable model
-# Change this to your actual model - options:
-#   - "llama3.1:70b" (best local)
-#   - "mistral:7b" (minimum viable)
-#   - "llama3.1:8b" (marginal)
-#   - "gemma3:4b" (NOT recommended - causes hallucinations)
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:4b")
+# UPDATED: Default to working 7B baseline model (4B models are BELOW MINIMUM and unreliable)
+# Your models: mistral:7b (✅ RECOMMENDED - working baseline), gpt-oss:20b (⚠️ too strict), qwen3-vl:4b (⚠️ small), gemma3:4b (❌ not recommended)
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral:7b")  # ✅ Recommended 7B baseline
 
 OLLAMA_TIMEOUT = 180  # Increased for larger models
 
@@ -104,3 +82,85 @@ class ValidationConfig:
     ]
     FLAG_NON_ASCII = True
     MAX_EVIDENCE_REFS = 15  # Flag if model claims more evidence than exists
+
+
+class ModelConfig:
+    """Model-specific configuration for grading behavior."""
+
+    # Model profiles with optimized parameters
+    # Format: "model_name": {"temperature": float, "max_tokens": int, "strictness_adjustment": str}
+    MODEL_PROFILES = {
+        # ═══════════════════════════════════════════════════════════════════════
+        # YOUR MODELS (based on ollama list)
+        # ═══════════════════════════════════════════════════════════════════════
+
+        "mistral:7b": {
+            "temperature": 0.1,
+            "max_tokens": 1500,
+            "strictness_adjustment": "balanced",  # ✅ WORKS WELL - Your baseline
+            "notes": "7B params - well-tested, produces fair grades"
+        },
+
+        "gpt-oss:20b": {
+            "temperature": 0.25,  # Higher temp - large model being too strict
+            "max_tokens": 2000,   # Can handle longer outputs
+            "strictness_adjustment": "lenient",  # ⚠️ TOO STRICT despite 20B params
+            "notes": "20B params - paradoxically strict, needs lenient calibration"
+        },
+
+        "qwen3-vl:4b": {
+            "temperature": 0.3,   # Higher temp for small model
+            "max_tokens": 1500,
+            "strictness_adjustment": "lenient",  # ⚠️ 4B is below 7B minimum
+            "notes": "4B vision model - below recommended size, may be unreliable"
+        },
+
+        "gemma3:4b": {
+            "temperature": 0.3,   # Higher temp for small model
+            "max_tokens": 1500,
+            "strictness_adjustment": "lenient",  
+            "notes": "4B params - BELOW MINIMUM, known to hallucinate"
+        },
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # Other common models (for reference)
+        # ═══════════════════════════════════════════════════════════════════════
+
+        "mistral": {
+            "temperature": 0.1,
+            "max_tokens": 1500,
+            "strictness_adjustment": "balanced",
+        },
+        "llama3:8b": {
+            "temperature": 0.2,
+            "max_tokens": 1500,
+            "strictness_adjustment": "lenient",
+        },
+        "llama3": {
+            "temperature": 0.2,
+            "max_tokens": 1500,
+            "strictness_adjustment": "lenient",
+        },
+    }
+
+    # Default fallback for unknown models
+    DEFAULT_PROFILE = {
+        "temperature": 0.15,  # Slightly higher than Mistral default
+        "max_tokens": 1500,
+        "strictness_adjustment": "lenient",  # Err on side of leniency for unknowns
+    }
+
+    @classmethod
+    def get_model_config(cls, model_name: str) -> dict:
+        """Get configuration for a specific model."""
+        # Try exact match first
+        if model_name in cls.MODEL_PROFILES:
+            return cls.MODEL_PROFILES[model_name]
+
+        # Try prefix match (e.g., "mistral:7b-instruct" matches "mistral")
+        for profile_name, config in cls.MODEL_PROFILES.items():
+            if model_name.startswith(profile_name):
+                return config
+
+        # Return default
+        return cls.DEFAULT_PROFILE

@@ -111,6 +111,7 @@ class QueryExpander:
     """Expands queries for better retrieval coverage."""
     
     TERM_EXPANSIONS = {
+        # General ML/AI terms
         'ml': ['machine learning', 'model', 'algorithm'],
         'ai': ['artificial intelligence', 'machine learning', 'deep learning'],
         'cloud': ['aws', 'azure', 'gcp', 'infrastructure', 'deployment'],
@@ -133,20 +134,95 @@ class QueryExpander:
         'stakeholder': ['user', 'customer', 'client', 'business'],
         'feasibility': ['viability', 'assessment', 'evaluation'],
         'cost': ['pricing', 'budget', 'expense', 'economics'],
+
+        # DSP-specific terms (CRITICAL: missing these caused 12 REFERRALs on strong report!)
+        'hypothesis': ['null hypothesis', 'alternative hypothesis', 'H0', 'H1', 'statistical test', 'significance'],
+        'eda': ['exploratory data analysis', 'visualization', 'summary statistics', 'distribution'],
+        'confidence': ['confidence interval', 'CI', 'margin of error', 'effect size'],
+        'effect': ['effect size', 'Cohen d', 'practical significance', 'magnitude'],
+        'p-value': ['significance', 'alpha', 'threshold', 'reject null'],
+        'anonymisation': ['pseudonymisation', 'de-identification', 'data masking', 'synthetic data'],
+        'dpia': ['data protection impact assessment', 'risk assessment', 'privacy'],
+        'dashboard': ['Power BI', 'visualization', 'report', 'chart', 'graph', 'figure'],
+        'lakehouse': ['data lake', 'warehouse', 'medallion', 'bronze silver gold', 'delta lake'],
+        'telemetry': ['event log', 'instrumentation', 'monitoring', 'observability'],
+        'bias': ['selection bias', 'measurement bias', 'confounding', 'fairness'],
+        'retention': ['data retention', 'storage limitation', 'deletion policy', 'lifecycle'],
     }
     
     KSB_CONTEXT = {
-        'K1': ['business objective', 'ml methodology', 'problem framing'],
-        'K2': ['storage', 'processing', 'organizational impact', 'data pipeline'],
+        # ═══════════════════════════════════════════════════════════════════════
+        # MLCC Module (Machine Learning with Cloud Computing)
+        # ═══════════════════════════════════════════════════════════════════════
+        'K1': ['business objective', 'ml methodology', 'problem framing', 'AI methodology', 'business value'],
+        'K2': ['storage', 'processing', 'organizational impact', 'data pipeline', 'infrastructure'],
         'K16': ['high performance', 'gpu', 'cpu', 'architecture', 'compute'],
         'K18': ['programming', 'data engineering', 'pipeline', 'code'],
         'K19': ['statistical', 'ml principles', 'evaluation', 'overfitting'],
         'K25': ['ml libraries', 'pytorch', 'tensorflow', 'keras'],
-        'S15': ['deployment', 'service', 'platform', 'poc'],
+        'S15': ['deployment', 'service', 'platform', 'poc', 'engineering', 'artefact', 'build'],
         'S16': ['requirements', 'data management', 'cloud', 'governance'],
         'S19': ['scalable', 'infrastructure', 'benchmarking'],
         'S23': ['best practice', 'dissemination', 'documentation'],
         'B5': ['cpd', 'professional development', 'learning'],
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # DSP Module (Data Science Principles) - CRITICAL: Was 100% missing!
+        # ═══════════════════════════════════════════════════════════════════════
+
+        # DSP Knowledge KSBs
+        # Note: K2 is shared with MLCC but extended above
+        'K5': ['analysis', 'research', 'EDA', 'exploratory', 'visualization', 'insight', 'methodology', 'business need'],
+        'K15': ['engineering', 'artefact', 'build', 'dashboard', 'reproducibility', 'versioning', 'modular', 'screenshot'],
+        'K20': ['data landscape', 'data types', 'collection', 'sources', 'schema', 'metadata', 'instrumentation', 'telemetry'],
+        'K22': ['hypothesis', 'statistical test', 't-test', 'p-value', 'null hypothesis', 'alternative hypothesis', 'significance', 'confidence interval', 'Welch', 'ANOVA', 'chi-squared'],
+        'K24': ['GDPR', 'data protection', 'privacy', 'ethics', 'compliance', 'regulation', 'legal'],
+        'K26': ['scientific method', 'experimental design', 'variable', 'control', 'bias', 'confounding', 'validity'],
+        'K27': ['data product', 'specification', 'requirements', 'stakeholder', 'design', 'lifecycle'],
+
+        # DSP Skills KSBs
+        'S1': ['storage architecture', 'data architecture', 'design', 'scalability', 'security', 'modelling'],
+        'S9': ['data manipulation', 'analysis', 'visualisation', 'filtering', 'aggregation', 'transformation', 'chart', 'graph', 'figure', 'dashboard', 'Power BI', 'matplotlib'],
+        'S10': ['dataset selection', 'methodology', 'business problem', 'rationale', 'justification', 'constraints'],
+        'S13': ['resource', 'architecture', 'platform', 'tool selection', 'Power BI', 'Python', 'SQL', 'cloud'],
+        'S17': ['data curation', 'data quality', 'validation', 'cleaning', 'duplicate', 'missing values', 'schema check', 'data dictionary'],
+        'S18': ['monitoring', 'performance', 'dashboard', 'infrastructure diagram', 'pipeline health', 'freshness', 'data lineage'],
+        'S21': ['uncertainty', 'confidence interval', 'error bars', 'effect size', 'Cohen', 'variability', 'sampling error', 'measurement error', 'sensitivity', 'limitation'],
+        'S22': ['EDA', 'exploratory data analysis', 'hypothesis testing', 'business decision', 'statistical test', 'strategy', 'recommendation', 'quantify impact'],
+        'S26': ['AI technique', 'DS technique', 'visual analytics', 'segmentation', 'forecasting', 'anomaly detection', 'evaluation metric'],
+
+        # DSP Behaviours KSBs
+        'B3': ['integrity', 'ethics', 'GDPR', 'data protection', 'anonymisation', 'pseudonymisation', 'access control', 'retention', 'DPIA', 'compliance', 'lawful basis'],
+        'B7': ['best practice', 'sharing', 'documentation', 'reflection', 'lessons learned', 'template', 'show-and-tell', 'dissemination'],
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # AIDI Module (AI-Driven Innovation) - CRITICAL: Was 100% missing!
+        # ═══════════════════════════════════════════════════════════════════════
+
+        # AIDI Knowledge KSBs
+        # 'K1': ['business objective', 'AI methodology', 'ML methodology', 'problem framing', 'business value'],  # Duplicate K1 - shared with MLCC
+        'K4': ['data extraction', 'data linkage', 'multiple systems', 'integration', 'schema', 'join', 'API', 'data lineage'],
+        # 'K5': ['analysis', 'research', 'design', 'deploy', 'user needs', 'domain research'],  # Duplicate K5 - shared with DSP
+        'K6': ['iterative', 'incremental', 'agile', 'MVP', 'delivery', 'sprint', 'feedback loop'],
+        'K8': ['policy', 'standard', 'guideline', 'organisational', 'compliance', 'SDLC'],
+        'K9': ['legal', 'ethical', 'regulatory', 'GDPR', 'DPIA', 'lawful basis', 'privacy', 'IP', 'licensing'],
+        'K11': ['AI roles', 'DS roles', 'DE roles', 'industry', 'society', 'lifecycle', 'governance'],
+        'K12': ['social context', 'ethical issues', 'automation', 'misuse', 'harm', 'bias', 'fairness', 'transparency', 'HITL'],
+        'K21': ['team support', 'collaboration', 'stakeholder', 'handover', 'runbook', 'adoption'],
+        # 'K24': ['GDPR', 'data protection', 'privacy', 'ethics', 'compliance', 'regulation'],  # Duplicate K24 - shared with DSP
+        'K29': ['accessibility', 'inclusive design', 'WCAG', 'usability', 'assistive technology'],
+
+        # AIDI Skills KSBs
+        'S3': ['requirements', 'elicitation', 'user stories', 'acceptance criteria', 'functional', 'non-functional'],
+        'S5': ['stakeholder', 'communication', 'presentation', 'reporting', 'engagement'],
+        'S6': ['direction', 'roadmap', 'innovation', 'trends', 'strategy'],
+        'S25': ['engineering practice', 'version control', 'testing', 'modular code', 'CI/CD', 'reproducibility'],
+        # 'S26': ['AI technique', 'DS technique', 'complex problem', 'evaluation', 'benchmark', 'metric'],  # Duplicate S26 - shared with DSP
+
+        # AIDI Behaviours KSBs
+        # 'B3': ['integrity', 'ethics', 'GDPR', 'data protection', 'anonymisation', 'pseudonymisation', 'access control', 'DPIA'],  # Duplicate B3 - shared with DSP
+        'B4': ['initiative', 'responsibility', 'challenge', 'ownership', 'problem-solving', 'iteration'],
+        'B8': ['trends', 'innovation', 'literature', 'references', 'research', 'industry'],
     }
     
     def expand_query(self, query: str, ksb_code: str = "") -> List[str]:
