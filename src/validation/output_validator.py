@@ -134,20 +134,80 @@ class OutputValidator:
                 )
                 confidence_score -= 0.2
         
-        # Check 5: Look for quotes that don't appear in evidence
+        # Check 5: Look for quotes that don't appear in evidence (improved to reduce false positives)
         quoted_text = re.findall(r'"([^"]{20,})"', evaluation_text)
-        for quote in quoted_text[:5]:  # Check first 5 quotes
+
+        # Phrases that indicate this is the LLM's own assessment, not a quote from the report
+        assessor_phrases = [
+            'the student', 'the report', 'the submission', 'the candidate',
+            'the work', 'the evidence', 'the author', 'this demonstrates',
+            'this shows', 'this indicates', 'based on', 'according to',
+            'the brief', 'the assignment', 'the task', 'the ksb',
+            'demonstrates', 'provides', 'shows', 'indicates', 'addresses'
+        ]
+
+        # Markdown table fragments and brief references (not actual quotes from report)
+        non_quote_patterns = [
+            r'^\s*\|',  # Starts with pipe (markdown table)
+            r'^\s*[✅❌]',  # Starts with checkmark/cross
+            r'task\s+\d+:',  # "Task 1:", "Task 2:", etc.
+            r'requirement\s+\d+',  # "Requirement 1", etc.
+            r'^\s*\[e\d+\]',  # Starts with evidence reference like [E1]
+            r'met\s*\|',  # Contains "MET |" (table cell)
+        ]
+
+        for quote in quoted_text[:10]:  # Check first 10 quotes
+            quote_lower = quote.lower()
+
+            # Skip if this is clearly the LLM's own assessment statement
+            is_assessor_statement = any(phrase in quote_lower[:50] for phrase in assessor_phrases)
+            if is_assessor_statement:
+                continue
+
+            # Skip markdown table fragments and brief references
+            is_non_quote = any(re.search(pattern, quote_lower, re.IGNORECASE) for pattern in non_quote_patterns)
+            if is_non_quote:
+                continue
+
+            # Skip very short quotes (likely not actual report quotes)
+            if len(quote) < 30:
+                continue
+
             # Normalize whitespace for comparison
             quote_normalized = ' '.join(quote.split()).lower()
             evidence_normalized = ' '.join(evidence_text.split()).lower()
-            
-            # Check if a significant portion of the quote exists in evidence
-            words = quote_normalized.split()[:5]  # First 5 words
+
+            # Check if the quote appears directly in evidence (exact or near-exact match)
+            # Use longer substring (10 words or 60% of quote, whichever is shorter)
+            words = quote_normalized.split()
+            check_length = min(10, max(4, int(len(words) * 0.6)))  # 60% of quote or at least 4 words
+
             if len(words) >= 4:
-                search_phrase = ' '.join(words)
-                if search_phrase not in evidence_normalized:
+                # Check multiple substrings to handle partial matches
+                found = False
+
+                # Try first N words
+                search_phrase = ' '.join(words[:check_length])
+                if search_phrase in evidence_normalized:
+                    found = True
+
+                # Try middle N words if not found
+                if not found and len(words) > check_length:
+                    mid_start = max(0, (len(words) - check_length) // 2)
+                    search_phrase = ' '.join(words[mid_start:mid_start + check_length])
+                    if search_phrase in evidence_normalized:
+                        found = True
+
+                # Try last N words if still not found
+                if not found and len(words) > check_length:
+                    search_phrase = ' '.join(words[-check_length:])
+                    if search_phrase in evidence_normalized:
+                        found = True
+
+                # Only flag if NO substantial substring found AND quote looks like it claims to be from report
+                if not found:
                     warnings.append(f"Quote may be fabricated: '{quote[:50]}...'")
-                    confidence_score -= 0.1
+                    confidence_score -= 0.05  # Reduced penalty from 0.1 to 0.05
         
         # Check 6: Detect if model is asking questions (breaking character)
         if re.search(r'\?$', evaluation_text.strip()[-100:]):

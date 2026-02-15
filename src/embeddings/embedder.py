@@ -1,10 +1,11 @@
 """
 Embedder - Local embedding generation using sentence-transformers.
 
-Uses all-MiniLM-L6-v2 by default:
-- 384 dimensions
-- ~80MB model size
+Uses intfloat/e5-base-v2 by default:
+- 768 dimensions
+- ~220MB model size
 - Optimized for CPU
+- Asymmetric encoding: "query: " prefix for queries, "passage: " for documents
 """
 from typing import List, Union
 import logging
@@ -21,13 +22,13 @@ logger = logging.getLogger(__name__)
 class Embedder:
     """
     Generates embeddings for text using local sentence-transformers models.
-    
-    Default model: all-MiniLM-L6-v2
+
+    Default model: intfloat/e5-base-v2 (768-dim, asymmetric encoding)
     """
-    
+
     def __init__(
         self,
-        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        model_name: str = "intfloat/e5-base-v2",
         device: str = "cpu",
         batch_size: int = 32
     ):
@@ -84,16 +85,33 @@ class Embedder:
         documents: List[str],
         show_progress: bool = True
     ) -> np.ndarray:
-        """Embed a list of document chunks."""
-        return self.embed(documents, show_progress=show_progress)
-    
+        """
+        Embed a list of document chunks with E5 "passage: " prefix.
+
+        For E5 models, documents must be prefixed with "passage: " for optimal retrieval.
+        """
+        # Add "passage: " prefix for E5 models (asymmetric encoding)
+        if "e5" in self.model_name.lower():
+            prefixed_docs = [f"passage: {doc}" for doc in documents]
+        else:
+            prefixed_docs = documents
+
+        return self.embed(prefixed_docs, show_progress=show_progress)
+
     def embed_query(self, query: str) -> np.ndarray:
         """
-        Embed a single query.
-        
+        Embed a single query with E5 "query: " prefix.
+
+        For E5 models, queries must be prefixed with "query: " for optimal retrieval.
         Returns 1D array of shape (embedding_dim,)
         """
-        embedding = self.embed([query], show_progress=False)
+        # Add "query: " prefix for E5 models (asymmetric encoding)
+        if "e5" in self.model_name.lower():
+            prefixed_query = f"query: {query}"
+        else:
+            prefixed_query = query
+
+        embedding = self.embed([prefixed_query], show_progress=False)
         return embedding[0]
     
     def similarity(

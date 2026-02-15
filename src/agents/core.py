@@ -290,7 +290,8 @@ class AgentOrchestrator:
                 "weighted_score": score_data.get("weighted_score", 0),
                 "evidence_strength": score_data.get("evidence_strength", "weak"),
                 "gaps_identified": score_data.get("gaps", []),
-                "rationale": score_data.get("rationale", "")
+                "rationale": score_data.get("rationale", ""),
+                "audit_trail": score_data.get("audit_trail", {})  # Include full audit trail
             })
         
         # Build feedback results list

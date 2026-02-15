@@ -42,33 +42,60 @@ class TestEmbedder:
         return Embedder()
     
     def test_embedder_initialization(self, embedder):
-        assert embedder.embedding_dim == 384
-    
+        assert embedder.embedding_dim == 768  # E5-base-v2 dimension
+
     def test_single_embedding(self, embedder):
         text = "This is a test sentence."
         embedding = embedder.embed_query(text)
-        assert embedding.shape == (384,)
-    
+        assert embedding.shape == (768,)
+
     def test_batch_embedding(self, embedder):
         texts = ["First test sentence.", "Second test sentence.", "Third test sentence."]
-        embeddings = embedder.embed(texts)
-        assert embeddings.shape == (3, 384)
+        embeddings = embedder.embed_documents(texts)  # Use embed_documents for batches
+        assert embeddings.shape == (3, 768)
     
     def test_similarity(self, embedder):
         import numpy as np
-        
+
         text1 = "The cat sat on the mat."
         text2 = "A cat was sitting on a mat."
         text3 = "Quantum physics is complex."
-        
+
         emb1 = embedder.embed_query(text1)
         emb2 = embedder.embed_query(text2)
         emb3 = embedder.embed_query(text3)
-        
+
         sim_12 = np.dot(emb1, emb2)
         sim_13 = np.dot(emb1, emb3)
-        
+
         assert sim_12 > sim_13
+
+    def test_e5_query_prefix(self, embedder):
+        """Test that embed_query adds 'query: ' prefix for E5 models."""
+        import numpy as np
+
+        # For E5 models, query and document embeddings of same text should differ
+        text = "This is a test sentence."
+
+        query_emb = embedder.embed_query(text)
+        doc_emb = embedder.embed_documents([text])[0]
+
+        # Should be different vectors due to different prefixes
+        if "e5" in embedder.model_name.lower():
+            assert not np.allclose(query_emb, doc_emb, atol=0.01), \
+                "E5 query and document embeddings should differ due to prefixes"
+        else:
+            # For non-E5 models, they should be the same
+            assert np.allclose(query_emb, doc_emb, atol=0.01), \
+                "Non-E5 models should produce same embedding regardless of prefix"
+
+    def test_e5_document_prefix(self, embedder):
+        """Test that embed_documents adds 'passage: ' prefix for E5 models."""
+        # This is implicitly tested in test_e5_query_prefix
+        # Just verify embed_documents accepts list and returns correct shape
+        texts = ["First doc", "Second doc"]
+        embeddings = embedder.embed_documents(texts)
+        assert embeddings.shape == (2, embedder.embedding_dim)
 
 
 class TestVectorStore:
@@ -114,8 +141,8 @@ class TestVectorStore:
         ]
         
         texts = [c['content'] for c in chunks]
-        embeddings = embedder.embed(texts)
-        
+        embeddings = embedder.embed_documents(texts)  # Use embed_documents for document chunks
+
         temp_store.add_criteria(chunks, embeddings)
         
         query_emb = embedder.embed_query("analysis of academic sources")

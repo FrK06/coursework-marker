@@ -35,15 +35,69 @@ class RubricApplierTool(BaseTool):
 
         section_scores = section_scores or {}
 
-        # Get brief context if available
+        # Get brief context if available - ONLY include tasks that map to this specific KSB
         brief_context = ""
         if context.assignment_brief:
-            # Find tasks related to this KSB
-            tasks = context.assignment_brief.get("tasks", [])
-            for task in tasks:
-                mapped_ksbs = task.get("mapped_ksbs", [])
-                if ksb_code in mapped_ksbs:
-                    brief_context += f"**{task.get('task_title', '')}**: {task.get('description', '')}\n"
+            # Reconstruct AssignmentBrief object for better context formatting
+            from ..brief.brief_parser import AssignmentBrief, TaskRequirement
+
+            try:
+                # Rebuild AssignmentBrief from dict
+                brief_dict = context.assignment_brief
+                tasks = [
+                    TaskRequirement(
+                        task_number=t.get('task_number', 0),
+                        task_title=t.get('task_title', ''),
+                        description=t.get('description', ''),
+                        deliverables=t.get('deliverables', []),
+                        mapped_ksbs=t.get('mapped_ksbs', []),
+                        word_count=t.get('word_count'),
+                        weighting=t.get('weighting')
+                    )
+                    for t in brief_dict.get('tasks', [])
+                ]
+
+                brief_obj = AssignmentBrief(
+                    module_code=brief_dict.get('module_code', ''),
+                    module_title=brief_dict.get('module_title', ''),
+                    tasks=tasks,
+                    overall_requirements=brief_dict.get('overall_requirements', ''),
+                    submission_guidelines=brief_dict.get('submission_guidelines', ''),
+                    ksb_task_mapping=brief_dict.get('ksb_task_mapping', {}),
+                    raw_text=brief_dict.get('raw_text', '')
+                )
+
+                # Use the built-in method to get KSB-specific context
+                brief_context = brief_obj.get_context_for_ksb(ksb_code)
+
+                # Add explicit instruction if no tasks map to this KSB
+                if not brief_obj.get_tasks_for_ksb(ksb_code):
+                    brief_context = (
+                        f"This KSB ({ksb_code}) should be assessed based on the overall report evidence, "
+                        f"not tied to a specific assignment task.\n\n"
+                        f"**IMPORTANT:** Do NOT penalize the student for not covering requirements from "
+                        f"other tasks that are not mapped to this KSB."
+                    )
+                else:
+                    # Add warning to ONLY assess against the shown tasks
+                    brief_context = (
+                        f"**⚠️ CRITICAL:** The tasks shown below are the ONLY tasks relevant to {ksb_code}. "
+                        f"Do NOT assess this KSB against tasks that are not listed here.\n\n"
+                        f"{brief_context}"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to reconstruct AssignmentBrief: {e}, using fallback")
+                # Fallback to original simple approach
+                tasks = context.assignment_brief.get("tasks", [])
+                for task in tasks:
+                    mapped_ksbs = task.get("mapped_ksbs", [])
+                    if ksb_code in mapped_ksbs:
+                        brief_context += f"**{task.get('task_title', '')}**: {task.get('description', '')}\n"
+
+                if not brief_context:
+                    brief_context = (
+                        f"This KSB ({ksb_code}) should be assessed based on the overall report evidence."
+                    )
 
         # Use mature template with anti-hallucination guards
         prompt = KSBPromptTemplates.format_ksb_evaluation(
@@ -343,6 +397,7 @@ class ScoringAgent(BaseAgent):
 
             # Validate the LLM response
             validation = None
+            was_retried = False  # Track if we retried due to validation failure
             if result.success and "_raw_response" in result.data:
                 raw_response = result.data.get("_raw_response", "")
                 validation = self.validator.validate_evaluation(
@@ -357,6 +412,7 @@ class ScoringAgent(BaseAgent):
                 # Handle validation results
                 if validation.suggested_action == 'reject':
                     self._log_verbose(f"⚠️ Rejecting evaluation for {ksb_code}, retrying once...")
+                    was_retried = True
                     # Retry once
                     result = rubric_tool.execute(
                         context,
@@ -439,6 +495,64 @@ class ScoringAgent(BaseAgent):
                 avg_score = sum(section_scores.values()) / len(section_scores) if section_scores else 2.5
                 weighted = avg_score / 5
 
+                # Build audit trail for transparency/explainability
+                audit_trail = {
+                    'evidence': {
+                        'chunks': [],
+                        'total_chunks_retrieved': len(context.evidence_map.get(ksb_code, [])),
+                        'chunks_after_filtering': len(evidence_parts),
+                        'search_strategy': {
+                            'query_variations': 0,  # Will be populated from evidence metadata
+                            'mode': 'hybrid',  # Default assumption
+                            'boilerplate_filtered': 0
+                        }
+                    },
+                    'llm_evaluation': {
+                        'raw_response': result.data.get('_raw_response', ''),
+                        'prompt_length_chars': 0,  # Prompt not stored currently
+                        'evidence_summary_length': len(evidence_summary),
+                        'model': getattr(self.llm, 'model', 'unknown')
+                    },
+                    'validation': {
+                        'action': validation.suggested_action if validation else 'not_validated',
+                        'confidence': validation.confidence_score if validation else 0.0,
+                        'warnings': validation.warnings if validation else [],
+                        'retried': was_retried  # True if validation triggered retry
+                    },
+                    'grade_decision': {
+                        'grade': grade,
+                        'pass_criteria_met': pass_met,
+                        'merit_criteria_met': merit_met,
+                        'evidence_strength': evidence_strength,
+                        'extraction_method': data.get('_extraction_method', 'unknown'),
+                        'confidence': confidence
+                    }
+                }
+
+                # Populate evidence chunks with actual text and metadata
+                for ev in context.evidence_map.get(ksb_code, [])[:10]:
+                    if isinstance(ev, dict):
+                        chunk_entry = {
+                            'text': ev.get('content', '')[:500],  # First 500 chars
+                            'section_id': ev.get('section', 'unknown'),
+                            'relevance_score': float(ev.get('relevance', 0.0)),
+                            'search_method': ev.get('search_method', 'hybrid')
+                        }
+                        audit_trail['evidence']['chunks'].append(chunk_entry)
+                    elif isinstance(ev, str):
+                        # If evidence is just a string, create minimal entry
+                        chunk_entry = {
+                            'text': ev[:500],
+                            'section_id': 'unknown',
+                            'relevance_score': 0.0,
+                            'search_method': 'unknown'
+                        }
+                        audit_trail['evidence']['chunks'].append(chunk_entry)
+
+                # Calculate boilerplate filtering (difference between retrieved and used)
+                audit_trail['evidence']['search_strategy']['boilerplate_filtered'] = \
+                    audit_trail['evidence']['total_chunks_retrieved'] - audit_trail['evidence']['chunks_after_filtering']
+
                 # Build KSB score entry
                 ksb_score_entry = {
                     "ksb_title": ksb.get("title", ""),
@@ -449,7 +563,8 @@ class ScoringAgent(BaseAgent):
                     "evidence_strength": evidence_strength,
                     "weighted_score": round(weighted, 3),
                     "gaps": data.get("gaps", []),
-                    "rationale": f"Pass {'met' if pass_met else 'NOT met'}. Merit {'met' if merit_met else 'not met'}. Evidence: {evidence_strength}."
+                    "rationale": f"Pass {'met' if pass_met else 'NOT met'}. Merit {'met' if merit_met else 'not met'}. Evidence: {evidence_strength}.",
+                    "audit_trail": audit_trail  # Add full audit trail
                 }
 
                 # Add validation warnings if flagged for review

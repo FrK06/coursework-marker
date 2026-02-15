@@ -537,31 +537,150 @@ def display_results(results: Dict[str, Any]):
 
     # KSB Details
     st.markdown("## 📋 KSB Breakdown")
-    
+
     for sr in results.get("scoring_results", []):
         ksb_code = sr.get("ksb_code", "")
         grade = sr.get("grade", "UNKNOWN")
         confidence = sr.get("confidence", "")
         ksb_title = sr.get("ksb_title", "")
-        
+
         icon = "🟢" if grade == "MERIT" else "🟡" if grade == "PASS" else "🔴"
-        
+
         #with st.expander(f"{icon} **{ksb_code}** - {sr.get('ksb_title', '')[:150]}... [{grade}]"):
         with st.expander(f"{icon} **{ksb_code}** - {ksb_title} [{grade}]"):
             st.markdown(f"**Confidence:** {confidence} | **Weighted Score:** {sr.get('weighted_score', 0):.3f}")
             st.markdown(f"**Rationale:** {sr.get('rationale', '')}")
-            
+
             # Show feedback
             fb = next((f for f in results.get("feedback_results", []) if f.get("ksb_code") == ksb_code), {})
             if fb.get("formatted_feedback"):
                 st.markdown(fb["formatted_feedback"])
-            
+
             # Gaps
             gaps = sr.get("gaps_identified", [])
             if gaps:
                 st.markdown("**Gaps:**")
                 for g in gaps[:5]:
                     st.markdown(f"- {g}")
+
+            # === TRANSPARENCY PANEL: Assessment Details ===
+            audit = sr.get('audit_trail', {})
+            if audit:  # Only show if audit trail exists
+                with st.expander(f"🔍 Assessment Details for {ksb_code}"):
+                    tab1, tab2, tab3, tab4 = st.tabs(["📄 Evidence Retrieved", "🤖 LLM Reasoning", "✅ Validation", "📊 Grade Decision"])
+
+                    # Tab 1: Evidence Retrieved
+                    with tab1:
+                        evidence_info = audit.get('evidence', {})
+                        total_chunks = evidence_info.get('total_chunks_retrieved', 0)
+                        filtered_chunks = evidence_info.get('chunks_after_filtering', 0)
+                        search_strat = evidence_info.get('search_strategy', {})
+
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Total Retrieved", total_chunks)
+                        col2.metric("After Filtering", filtered_chunks)
+                        col3.metric("Boilerplate Filtered", search_strat.get('boilerplate_filtered', 0))
+
+                        st.caption(f"**Search Mode:** {search_strat.get('mode', 'unknown')} | **Query Variations:** {search_strat.get('query_variations', 0)}")
+
+                        st.markdown("---")
+                        st.markdown("**Evidence Chunks:**")
+
+                        chunks = evidence_info.get('chunks', [])
+                        if chunks:
+                            for idx, chunk in enumerate(chunks, 1):
+                                with st.container():
+                                    # Metadata badge
+                                    section = chunk.get('section_id', 'unknown')
+                                    relevance = chunk.get('relevance_score', 0.0)
+                                    method = chunk.get('search_method', 'unknown')
+
+                                    st.caption(f"**Chunk {idx}** | Section: `{section}` | Relevance: `{relevance:.2f}` | Method: `{method}`")
+
+                                    # Chunk text with theme-adaptive styling
+                                    chunk_text = chunk.get('text', '')
+                                    if chunk_text:
+                                        # Truncate if too long
+                                        display_text = chunk_text if len(chunk_text) <= 500 else chunk_text + "..."
+                                        # Use theme-compatible semi-transparent background with border accent
+                                        st.markdown(
+                                            f"<div style='background-color: rgba(255,255,255,0.05); color: inherit; "
+                                            f"padding: 10px; border-radius: 5px; border-left: 3px solid #4CAF50; "
+                                            f"margin-bottom: 0.5rem; font-family: monospace; font-size: 0.9em;'>"
+                                            f"{display_text}</div>",
+                                            unsafe_allow_html=True
+                                        )
+                                    else:
+                                        st.caption("_(No text)_")
+                        else:
+                            st.info("No evidence chunks available")
+
+                    # Tab 2: LLM Reasoning
+                    with tab2:
+                        llm_info = audit.get('llm_evaluation', {})
+
+                        col1, col2 = st.columns(2)
+                        col1.metric("Evidence Summary Length", f"{llm_info.get('evidence_summary_length', 0)} chars")
+                        col2.metric("Model", llm_info.get('model', 'unknown'))
+
+                        st.markdown("---")
+                        st.markdown("**Full LLM Response:**")
+
+                        raw_response = llm_info.get('raw_response', '')
+                        if raw_response:
+                            st.code(raw_response, language="text")
+                        else:
+                            st.info("No LLM response captured")
+
+                    # Tab 3: Validation
+                    with tab3:
+                        val_info = audit.get('validation', {})
+                        action = val_info.get('action', 'unknown')
+                        conf = val_info.get('confidence', 0.0)
+                        warnings = val_info.get('warnings', [])
+                        retried = val_info.get('retried', False)
+
+                        # Colored badge for validation action
+                        action_color = "#10b981" if action == "accept" else "#f59e0b" if action == "flag_for_review" else "#ef4444"
+                        st.markdown(f"<span style='background-color: {action_color}; color: white; padding: 0.3rem 0.8rem; border-radius: 20px; font-weight: 600;'>{action.upper()}</span>", unsafe_allow_html=True)
+
+                        st.metric("Validation Confidence", f"{conf:.2f}")
+
+                        if retried:
+                            st.warning("⚠️ Response was retried due to validation failure")
+
+                        st.markdown("---")
+
+                        if warnings:
+                            st.markdown("**Validation Warnings:**")
+                            for idx, warning in enumerate(warnings, 1):
+                                st.warning(f"{idx}. {warning}")
+                        else:
+                            st.success("✓ No validation warnings")
+
+                    # Tab 4: Grade Decision
+                    with tab4:
+                        decision = audit.get('grade_decision', {})
+
+                        final_grade = decision.get('grade', 'UNKNOWN')
+                        grade_color = "#10b981" if final_grade == "MERIT" else "#3b82f6" if final_grade == "PASS" else "#ef4444"
+                        st.markdown(f"<div style='text-align: center; margin: 1rem 0;'><span style='background-color: {grade_color}; color: white; padding: 0.5rem 1.5rem; border-radius: 20px; font-weight: 700; font-size: 1.2rem;'>{final_grade}</span></div>", unsafe_allow_html=True)
+
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            st.markdown("**Criteria Met:**")
+                            pass_met = decision.get('pass_criteria_met', False)
+                            merit_met = decision.get('merit_criteria_met', False)
+                            st.checkbox("Pass Criteria", value=pass_met, disabled=True, key=f"{ksb_code}_pass_check")
+                            st.checkbox("Merit Criteria", value=merit_met, disabled=True, key=f"{ksb_code}_merit_check")
+
+                        with col2:
+                            st.markdown("**Assessment Metrics:**")
+                            st.metric("Evidence Strength", decision.get('evidence_strength', 'unknown'))
+                            st.metric("Confidence", decision.get('confidence', 'unknown'))
+
+                        st.caption(f"**Extraction Method:** {decision.get('extraction_method', 'unknown')}")
 
 
 def main():
@@ -616,10 +735,34 @@ def main():
         
         st.markdown("---")
         st.session_state.verbose_mode = st.checkbox("Verbose mode", value=st.session_state.verbose_mode)
-        
+
         if st.button("🔄 Reset"):
             for key in ['report_data', 'agent_results', 'assessment_complete', 'current_phase']:
                 st.session_state[key] = None if key != 'assessment_complete' else False
+            st.rerun()
+
+        # Reset index button (needed after embedding model upgrade)
+        if st.button("🗑️ Reset Index", help="Delete vector index (use after upgrading embedding model)"):
+            import shutil
+            from config import INDEX_DIR
+            index_dirs = [
+                INDEX_DIR,
+                INDEX_DIR.parent / "indexes_e5-base-v2",
+                INDEX_DIR.parent / "indexes"
+            ]
+            deleted_count = 0
+            for idx_dir in index_dirs:
+                if idx_dir.exists():
+                    try:
+                        shutil.rmtree(idx_dir)
+                        deleted_count += 1
+                        logger.info(f"Deleted index directory: {idx_dir}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete {idx_dir}: {e}")
+            if deleted_count > 0:
+                st.success(f"✓ Deleted {deleted_count} index director{'y' if deleted_count == 1 else 'ies'}")
+            else:
+                st.info("No index directories found to delete")
             st.rerun()
     
     # Main content

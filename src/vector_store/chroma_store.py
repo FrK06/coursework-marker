@@ -29,7 +29,7 @@ class ChromaStore:
     
     def __init__(
         self,
-        persist_directory: str = "./data/indexes",
+        persist_directory: str = "./data/indexes_e5-base-v2",
         criteria_collection: str = "criteria",
         report_collection: str = "report"
     ):

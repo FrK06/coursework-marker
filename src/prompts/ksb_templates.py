@@ -109,10 +109,15 @@ Follow these steps IN ORDER:
 
 ### STEP 1: BRIEF REQUIREMENTS CHECK
 
-Based on the Assignment Brief above, list what the student should have demonstrated:
-- [ ] Requirement 1 from brief
-- [ ] Requirement 2 from brief
+**⚠️ IMPORTANT:** Only assess this KSB against the tasks shown in the Assignment Brief Context above.
+Do NOT penalize the student for not covering tasks that are not listed for this KSB.
+
+Based on the Assignment Brief above, list what the student should have demonstrated FOR THIS SPECIFIC KSB:
+- [ ] Requirement 1 from the tasks shown above
+- [ ] Requirement 2 from the tasks shown above
 - [ ] etc.
+
+If no specific tasks are listed, assess based on overall report quality.
 
 ### STEP 2: LIST EVIDENCE FOUND
 
@@ -136,23 +141,64 @@ Search the evidence above and list ALL relevant content:
 
 ### STEP 4: ASSESS MERIT CRITERIA (only if Pass is met)
 
+**⚠️ MANDATORY:** You MUST evaluate EACH merit criterion individually. Do NOT skip this step.
+
+For EACH merit criterion listed in the Merit row of the rubric above:
+1. **Search the evidence** for ANY content that addresses this specific merit requirement
+2. **If evidence exists:** Quote it with [E] reference and mark ✅ MET
+3. **If NO evidence exists:** Mark ❌ NOT MET with explanation
+4. **Do NOT write "NONE" or skip criteria** - assess each one individually
+
 | Merit Requirement | Status | Evidence |
 |-------------------|--------|----------|
-| [requirement] | ✅ MET / ❌ NOT MET | [Ex] or "NOT FOUND" |
+| [Copy exact text from merit_criteria above] | ✅ MET / ❌ NOT MET | [Ex] or "NOT FOUND" |
+| [Next merit criterion if multiple] | ✅ MET / ❌ NOT MET | [Ex] or "NOT FOUND" |
+
+**Note:** If the merit criteria contains multiple requirements (e.g., "demonstrates X AND provides Y"),
+assess each component separately and mark MET only if ALL components have evidence.
+
+**Special guidance for statistical/hypothesis testing KSBs (K22, K26, S22):**
+If the merit criteria mentions "strong statistical reasoning", check for:
+- Effect size measures (Cohen's d, odds ratio, R², etc.)
+- Confidence intervals (95% CI, credible intervals)
+- Assumption checking (normality, homogeneity, independence)
+- Uncertainty quantification (p-values WITH interpretation, confidence levels)
+- Practical significance vs statistical significance
+- Business/organisational decision linked to statistical results
+
+If 4+ of these elements are present with evidence, mark merit criteria as ✅ MET.
 
 ### STEP 5: GRADE DECISION
+
+**⚠️ IMPORTANT:** Set "grade" to EXACTLY ONE of: PASS, MERIT, or REFERRAL (not all three).
+Set "confidence" to EXACTLY ONE of: HIGH, MEDIUM, or LOW.
 
 ```json
 {{
   "ksb_code": "{ksb_code}",
-  "grade": "PASS|MERIT|REFERRAL",
-  "confidence": "HIGH|MEDIUM|LOW",
-  "pass_criteria_met": true|false,
-  "merit_criteria_met": true|false,
-  "brief_requirements_met": ["list", "of", "met", "requirements"],
-  "brief_requirements_missing": ["list", "of", "missing"],
+  "grade": "<CHOOSE ONE: PASS or MERIT or REFERRAL>",
+  "confidence": "<CHOOSE ONE: HIGH or MEDIUM or LOW>",
+  "pass_criteria_met": true or false,
+  "merit_criteria_met": true or false,
+  "brief_requirements_met": ["list of requirements met"],
+  "brief_requirements_missing": ["list of requirements missing"],
   "key_evidence": ["E1", "E2"],
   "main_gap": "description or null"
+}}
+```
+
+**Example valid JSON:**
+```json
+{{
+  "ksb_code": "K22",
+  "grade": "MERIT",
+  "confidence": "HIGH",
+  "pass_criteria_met": true,
+  "merit_criteria_met": true,
+  "brief_requirements_met": ["Statistical test selection", "Result interpretation"],
+  "brief_requirements_missing": [],
+  "key_evidence": ["E1", "E3", "E5"],
+  "main_gap": null
 }}
 ```
 
@@ -420,9 +466,21 @@ def extract_grade_from_evaluation(evaluation: str) -> Dict[str, Any]:
             parsed = json.loads(json_match.group(1))
             if 'grade' in parsed:
                 grade = parsed['grade'].upper().strip()
+
+                # Safety net: Detect if LLM copied placeholder text literally
+                if '|' in grade or '<CHOOSE' in grade.upper() or 'OR' in grade:
+                    # Derive grade from criteria_met fields instead
+                    if parsed.get('merit_criteria_met') is True:
+                        grade = 'MERIT'
+                    elif parsed.get('pass_criteria_met') is True:
+                        grade = 'PASS'
+                    else:
+                        grade = 'REFERRAL'
+                    logger.warning(f"LLM output placeholder text in grade field, derived: {grade}")
+
                 if grade in ['PASS', 'MERIT', 'REFERRAL']:
                     result['grade'] = grade
-                    result['confidence'] = parsed.get('confidence', 'MEDIUM').upper()
+                    result['confidence'] = parsed.get('confidence', 'MEDIUM').upper().split('|')[0].strip()  # Handle confidence placeholders too
                     result['method'] = 'json'
                     result['pass_criteria_met'] = parsed.get('pass_criteria_met')
                     result['merit_criteria_met'] = parsed.get('merit_criteria_met')

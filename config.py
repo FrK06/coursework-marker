@@ -11,7 +11,7 @@ BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 CRITERIA_DIR = DATA_DIR / "criteria"
 REPORTS_DIR = DATA_DIR / "reports"
-INDEX_DIR = DATA_DIR / "indexes"
+INDEX_DIR = DATA_DIR / "indexes_e5-base-v2"  # Updated for E5 model (768-dim)
 
 # Ensure directories exist
 for dir_path in [CRITERIA_DIR, REPORTS_DIR, INDEX_DIR]:
@@ -36,12 +36,12 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "standard")  # minimal, standard, verbose
 ENABLE_PERFORMANCE_LOGGING = os.getenv("ENABLE_PERFORMANCE_LOGGING", "true").lower() == "true"
 SLOW_OPERATION_THRESHOLD_MS = float(os.getenv("SLOW_OPERATION_THRESHOLD_MS", "3000"))  # Warn if operation exceeds this
 
-# Embedding settings
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-EMBEDDING_DIMENSION = 384
+# Embedding settings (upgraded from all-MiniLM-L6-v2 to E5-base-v2)
+EMBEDDING_MODEL = "intfloat/e5-base-v2"
+EMBEDDING_DIMENSION = 768  # Increased from 384 (E5-base-v2 dimension)
 EMBEDDING_BATCH_SIZE = 32
 
-# Vector store settings
+# Vector store settings (updated for E5-base-v2)
 CHROMA_PERSIST_DIR = str(INDEX_DIR)
 
 

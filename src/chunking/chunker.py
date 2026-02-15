@@ -94,6 +94,10 @@ class SmartChunker:
             return len(self.tokenizer.encode(text))
         else:
             return int(len(text.split()) * 1.3)
+
+    def count_words(self, text: str) -> int:
+        """Count words in text."""
+        return len(text.split())
     
     def extract_keywords(self, text: str, max_keywords: int = 10) -> List[str]:
         """Extract key terms from text for hybrid search."""
@@ -335,22 +339,77 @@ class SmartChunker:
     
     def chunk_report(self, chunks: List[Any], document_id: str = "report") -> List[TextChunk]:
         """
-        FIXED: Chunk a student report with better semantic boundary awareness.
-        Creates more granular chunks to preserve document structure.
+        Chunk a student report with subsection merging and parent context.
+
+        Requirements:
+        1. Minimum 200 words per chunk (merge small subsections)
+        2. Add parent section context to each chunk (prepended)
+        3. Target 15-20 chunks (200-400 words each) for typical 3000-5000 word reports
+        4. Skip chunks <50 words
         """
         result_chunks = []
         chunk_counter = 0
-        
+
+        # Track current parent section (level 1 heading)
+        parent_section = None
+        parent_section_title = None
+
+        # Track current subsection
         current_section = None
         current_section_number = None
-        parent_section = None
-        current_content = []
-        current_tokens = 0
+
+        # Accumulate content under same parent until minimum word count
+        content_accumulator = []
+        words_accumulated = 0
         current_page_start = 1
         current_page_end = 1
         current_figures = []
         has_figure_ref = False
-        
+
+        def create_chunk():
+            """Helper to create a chunk from accumulated content."""
+            nonlocal chunk_counter, content_accumulator, words_accumulated
+            nonlocal current_page_start, current_figures, has_figure_ref
+
+            if not content_accumulator:
+                return
+
+            merged_content = '\n\n'.join(content_accumulator)
+            merged_words = self.count_words(merged_content)
+
+            # Skip chunks < 50 words
+            if merged_words < 50:
+                logger.debug(f"Skipping chunk with only {merged_words} words")
+                return
+
+            # Prepend structured header with section number and parent context
+            section_num_display = current_section_number if current_section_number else "?"
+            parent_title_display = parent_section_title if parent_section_title else current_section
+
+            if parent_title_display:
+                # Structured header format: [Section X.X | Parent Title]
+                header = f"[Section {section_num_display} | {parent_title_display}]"
+                merged_content = f"{header}\n\n{merged_content}"
+
+            keywords = self.extract_keywords(merged_content)
+
+            result_chunks.append(TextChunk(
+                content=merged_content,
+                chunk_id=f"{document_id}_chunk_{chunk_counter}",
+                document_type='report',
+                token_count=self.count_tokens(merged_content),
+                page_start=current_page_start,
+                page_end=current_page_end,
+                section_title=current_section,
+                section_number=current_section_number,
+                has_figure_reference=has_figure_ref,
+                figure_ids=current_figures.copy(),
+                keywords=keywords,
+                parent_section=parent_section,
+                chunk_index=chunk_counter
+            ))
+            chunk_counter += 1
+
         for chunk in chunks:
             content = chunk.content if hasattr(chunk, 'content') else str(chunk)
             page = getattr(chunk, 'page_estimate', 1) or getattr(chunk, 'page_number', 1)
@@ -359,130 +418,104 @@ class SmartChunker:
             figure_ids = getattr(chunk, 'figure_ids', [])
             has_fig = getattr(chunk, 'has_figure_reference', False)
             section_num = getattr(chunk, 'section_number', None)
-            
-            # FIXED: Detect sections from content if not already a heading
-            is_content_heading = False
-            content_section_num = None
-            content_heading_level = None
-            
+
+            # Detect sections from content if not already a heading
             if chunk_type != 'heading':
                 is_content_heading, content_section_num, content_heading_level = self._detect_section_from_content(content)
                 if is_content_heading:
                     chunk_type = 'heading'
                     heading_level = content_heading_level
                     section_num = content_section_num
-            
-            content_tokens = self.count_tokens(content)
-            
+
+            content_words = self.count_words(content)
+
             if figure_ids:
                 current_figures.extend(figure_ids)
+            if has_fig:
                 has_figure_ref = True
-            
+
             is_heading = chunk_type == 'heading' or heading_level is not None
-            if is_heading and heading_level and heading_level <= 2:
-                parent_section = content[:100]
-            
-            should_split = False
-            
-            # FIXED: More aggressive splitting for better granularity
-            if current_tokens + content_tokens > self.report_chunk_size:
-                should_split = True
-            elif is_heading and current_content:  # Split on ANY heading
-                should_split = True
-            elif current_tokens + content_tokens > self.max_chunk_size:
-                should_split = True
-            # FIXED: Also split on paragraph breaks if chunk is getting long
-            elif current_tokens > self.report_chunk_size * 0.7 and content.startswith('\n'):
-                should_split = True
-            
-            if should_split and current_content:
-                combined_content = '\n\n'.join(current_content)
-                keywords = self.extract_keywords(combined_content)
-                
-                result_chunks.append(TextChunk(
-                    content=combined_content,
-                    chunk_id=f"{document_id}_chunk_{chunk_counter}",
-                    document_type='report',
-                    token_count=self.count_tokens(combined_content),
-                    page_start=current_page_start,
-                    page_end=current_page_end,
-                    section_title=current_section,
-                    section_number=current_section_number,
-                    has_figure_reference=has_figure_ref,
-                    figure_ids=current_figures.copy(),
-                    keywords=keywords,
-                    parent_section=parent_section,
-                    chunk_index=chunk_counter
-                ))
-                chunk_counter += 1
-                
-                # FIXED: Smaller overlap to create more distinct chunks
-                overlap_content = []
-                overlap_tokens = 0
-                
-                for prev_content in reversed(current_content):
-                    prev_tokens = self.count_tokens(prev_content)
-                    if overlap_tokens + prev_tokens <= self.report_overlap:
-                        overlap_content.insert(0, prev_content)
-                        overlap_tokens += prev_tokens
-                    else:
-                        break
-                
-                current_content = overlap_content + [content]
-                current_tokens = overlap_tokens + content_tokens
+
+            # Handle parent section (level 1 heading)
+            if is_heading and heading_level and heading_level == 1:
+                # New parent section - flush accumulated content first
+                create_chunk()
+
+                # Reset accumulator
+                content_accumulator = []
+                words_accumulated = 0
                 current_page_start = page
-                current_figures = figure_ids.copy()
-                has_figure_ref = has_fig
-            else:
-                if not current_content:
-                    current_page_start = page
-                
-                current_content.append(content)
-                current_tokens += content_tokens
-            
-            if is_heading:
+                current_figures = []
+                has_figure_ref = False
+
+                # Update parent tracking
+                parent_section = content[:100]
+                parent_section_title = content.strip()
+                current_section = content
+                current_section_number = section_num
+                current_page_end = page
+
+                # Don't add parent heading to accumulator
+                continue
+
+            # Handle subsection headings (level 2+)
+            if is_heading and heading_level and heading_level > 1:
                 current_section = content
                 if section_num:
                     current_section_number = section_num
-            
+
+            # Add content to accumulator
+            content_accumulator.append(content)
+            words_accumulated += content_words
             current_page_end = page
-        
-        if current_content:
-            combined_content = '\n\n'.join(current_content)
-            keywords = self.extract_keywords(combined_content)
-            
-            result_chunks.append(TextChunk(
-                content=combined_content,
-                chunk_id=f"{document_id}_chunk_{chunk_counter}",
-                document_type='report',
-                token_count=self.count_tokens(combined_content),
-                page_start=current_page_start,
-                page_end=current_page_end,
-                section_title=current_section,
-                section_number=current_section_number,
-                has_figure_reference=has_figure_ref,
-                figure_ids=current_figures,
-                keywords=keywords,
-                parent_section=parent_section,
-                chunk_index=chunk_counter
-            ))
-        
-        logger.info(f"Created {len(result_chunks)} report chunks (FIXED chunker)")
+
+            # Check if we should create a chunk
+            should_create = False
+
+            # Condition 1: Reached target word count (200-400 words)
+            if words_accumulated >= 200:
+                # Check if next chunk would be a level-1 heading
+                # If so, wait for it to trigger the flush
+                should_create = True
+
+            # Condition 2: Exceeded max chunk size (400 words)
+            if words_accumulated >= 400:
+                should_create = True
+
+            if should_create:
+                create_chunk()
+
+                # Reset accumulator
+                content_accumulator = []
+                words_accumulated = 0
+                current_page_start = page
+                current_figures = []
+                has_figure_ref = False
+
+        # Flush remaining content
+        create_chunk()
+
+        logger.info(f"Created {len(result_chunks)} report chunks (word-based merging, avg {sum(self.count_words(c.content) for c in result_chunks) // max(len(result_chunks), 1)} words/chunk)")
         return result_chunks
     
     def get_chunking_stats(self, chunks: List[TextChunk]) -> Dict[str, Any]:
         """Get statistics about the chunked document."""
         if not chunks:
             return {'total_chunks': 0}
-        
+
         token_counts = [c.token_count for c in chunks]
-        
+        word_counts = [self.count_words(c.content) for c in chunks]
+
         return {
             'total_chunks': len(chunks),
             'total_tokens': sum(token_counts),
             'avg_tokens': sum(token_counts) / len(chunks),
             'min_tokens': min(token_counts),
             'max_tokens': max(token_counts),
+            'total_words': sum(word_counts),
+            'avg_words': sum(word_counts) / len(chunks),
+            'min_words': min(word_counts),
+            'max_words': max(word_counts),
             'chunks_with_figures': sum(1 for c in chunks if c.has_figure_reference),
             'chunks_with_keywords': sum(1 for c in chunks if c.keywords),
             'chunks_with_sections': sum(1 for c in chunks if c.section_title),
