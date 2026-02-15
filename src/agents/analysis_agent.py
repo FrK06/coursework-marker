@@ -11,11 +11,13 @@ Maps findings to KSB criteria.
 """
 import json
 import re
+import time
 from typing import Dict, Any, List, Optional
 import logging
 
 from .core import BaseAgent, BaseTool, AgentContext, AgentRole, ToolResult
 from ..retrieval.retriever import Retriever, QueryExpander
+from ..utils.logger import create_logger, LogLevel
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +244,50 @@ class EvidenceFinderTool(BaseTool):
         self.vector_store = vector_store
         self.retriever = retriever
 
+    @staticmethod
+    def _is_boilerplate(chunk_text: str) -> bool:
+        """Filter out boilerplate chunks (title pages, headers, reflection tables)."""
+        text_lower = chunk_text.lower().strip()
+
+        # Too short to be meaningful evidence
+        if len(text_lower) < 100:
+            return True
+
+        # Title page patterns (module name + "workplace activity report")
+        if any(pattern in text_lower for pattern in [
+            "workplace activity report",
+            "level 7 artificial intelligence",
+            "data science principles -",
+            "machine learning with cloud computing -",
+            "ai-driven innovation -"
+        ]):
+            # Check if it's JUST a title (not substantive content with title mention)
+            if len(text_lower) < 200:
+                return True
+
+        # KSB reflection table headers
+        if any(pattern in text_lower for pattern in [
+            "reflection on progress against the knowledge",
+            "| ksb | reflection",
+            "ksb code | reflection",
+            "knowledge, skills and behaviours"
+        ]):
+            # If chunk is primarily table header (short and contains table markers)
+            if text_lower.count("|") > 3 and len(text_lower) < 300:
+                return True
+
+        # Table of contents
+        if all(task in text_lower for task in ["task 1", "task 2", "task 3"]):
+            # If it contains all task numbers but is short, likely ToC
+            if len(text_lower) < 400:
+                return True
+
+        # Schema/structure tables (common boilerplate)
+        if "table" in text_lower and "|" in text_lower and len(text_lower) < 150:
+            return True
+
+        return False
+
     def execute(self, context: AgentContext, ksb_code: str, requirement: str) -> ToolResult:
         # Prefer Retriever if available (hybrid search)
         if self.retriever:
@@ -251,13 +297,29 @@ class EvidenceFinderTool(BaseTool):
                     requirement, ksb_code
                 )
 
-                # Extract evidence from RetrievalResult
-                evidence = [{
-                    "content": chunk.get("content", "")[:400],
+                # Extract evidence from RetrievalResult (up to 10 results)
+                raw_evidence = [{
+                    "content": chunk.get("content", ""),
                     "section": chunk.get("metadata", {}).get("section_title", "Unknown"),
                     "relevance": chunk.get("similarity", 0),
                     "chunk_id": chunk.get("chunk_id", "")
-                } for chunk in retrieval_result.retrieved_chunks[:10]]  # Up to 10 results
+                } for chunk in retrieval_result.retrieved_chunks[:10]]
+
+                # Filter out boilerplate chunks
+                filtered_evidence = [
+                    ev for ev in raw_evidence
+                    if not self._is_boilerplate(ev["content"])
+                ]
+
+                # If filtering removed too much (less than 3 chunks), keep originals
+                evidence = filtered_evidence if len(filtered_evidence) >= 3 else raw_evidence
+
+                # Log filtering results
+                if len(filtered_evidence) < len(raw_evidence):
+                    logger.debug(
+                        f"{ksb_code}: Filtered {len(raw_evidence) - len(filtered_evidence)} boilerplate chunks "
+                        f"({len(raw_evidence)} → {len(evidence)})"
+                    )
 
                 return ToolResult(self.name, True, {
                     "ksb_code": ksb_code,
@@ -281,11 +343,28 @@ class EvidenceFinderTool(BaseTool):
                     n_results=RetrievalConfig.REPORT_TOP_K  # Use config instead of hardcoded 5
                 )
 
-                evidence = [{
-                    "content": r.get("content", "")[:400],
+                # Extract raw evidence
+                raw_evidence = [{
+                    "content": r.get("content", ""),
                     "section": r.get("metadata", {}).get("section_title", "Unknown"),
                     "relevance": r.get("similarity", 0)
                 } for r in results]
+
+                # Filter out boilerplate chunks
+                filtered_evidence = [
+                    ev for ev in raw_evidence
+                    if not self._is_boilerplate(ev["content"])
+                ]
+
+                # If filtering removed too much, keep originals
+                evidence = filtered_evidence if len(filtered_evidence) >= 3 else raw_evidence
+
+                # Log filtering
+                if len(filtered_evidence) < len(raw_evidence):
+                    logger.debug(
+                        f"{ksb_code}: Filtered {len(raw_evidence) - len(filtered_evidence)} boilerplate chunks "
+                        f"({len(raw_evidence)} → {len(evidence)})"
+                    )
 
                 return ToolResult(self.name, True, {
                     "ksb_code": ksb_code,
@@ -335,12 +414,22 @@ class AnalysisAgent(BaseAgent):
         self.embedder = embedder
         self.vector_store = vector_store
         self.retriever = retriever
+
+        # Initialize ImageProcessor for OCR capabilities
+        from ..document_processing.image_processor import ImageProcessor
+        self.image_processor = ImageProcessor(ollama_client=llm)
+
+        # Initialize enhanced logger
+        from config import LOG_LEVEL
+        log_level = LogLevel.VERBOSE if verbose else LogLevel(LOG_LEVEL)
+        self.enhanced_logger = create_logger("ANALYSIS", log_level, verbose)
     
     def process(self, context: AgentContext) -> AgentContext:
         """Analyze all document content."""
-        
-        self._log_verbose("Starting analysis phase...")
-        
+
+        self.enhanced_logger.phase("Starting analysis phase...")
+        analysis_start = time.time()
+
         # Step 1: Extract sections
         extractor = self.tools["extract_sections"]
         self._log_tool_call("extract_sections")
@@ -425,28 +514,140 @@ class AnalysisAgent(BaseAgent):
                         context.image_analyses.append(result.data)
             else:
                 self._log_verbose("Skipping image analysis - no base64 data available")
-        
+
+        # Step 3.5: OCR preprocessing for images (extract text from code/charts/diagrams)
+        if context.images and self.image_processor:
+            from config import OCR_ENABLED
+
+            if OCR_ENABLED:
+                with self.enhanced_logger.timer(f"OCR extraction ({len(context.images)} images)", warn_threshold_ms=len(context.images) * 2000):
+                    self.enhanced_logger.info(f"Running OCR on {len(context.images)} images...")
+                    ocr_chunks = []
+                    total_chars_extracted = 0
+
+                    for idx, img in enumerate(context.images, 1):  # Process all images (charts, diagrams, graphs, code)
+                        self.enhanced_logger.progress(idx, len(context.images), "image")
+
+                        # Convert to dict if it's a ProcessedImage object
+                        if hasattr(img, 'image_id'):
+                            img_dict = {
+                                'image_id': img.image_id,
+                                'base64_data': getattr(img, 'base64_data', ''),
+                                'caption': getattr(img, 'caption', '')
+                            }
+                        else:
+                            img_dict = img
+
+                        if not img_dict.get('base64_data') and not img_dict.get('base64'):
+                            continue
+
+                        # Create a simple object for OCR extraction
+                        class ImageData:
+                            def __init__(self, data):
+                                self.image_id = data.get('image_id', 'unknown')
+                                self.base64_data = data.get('base64_data') or data.get('base64', '')
+                                self.caption = data.get('caption', '')
+
+                        img_obj = ImageData(img_dict)
+
+                        # Time individual OCR operation
+                        ocr_start = time.time()
+                        ocr_text = self.image_processor.extract_text_with_ocr(img_obj)
+                        ocr_duration_ms = (time.time() - ocr_start) * 1000
+
+                        if ocr_text and len(ocr_text) > 10:  # Skip empty/trivial results
+                            # Create searchable chunk from OCR text
+                            ocr_chunk = {
+                                'content': f"[OCR from {img_obj.image_id}]: {ocr_text}",
+                                'chunk_type': 'ocr',
+                                'chunk_index': len(context.chunks),
+                                'metadata': {
+                                    'source_image': img_obj.image_id,
+                                    'caption': img_obj.caption,
+                                    'has_figure_reference': True
+                                }
+                            }
+                            ocr_chunks.append(ocr_chunk)
+                            total_chars_extracted += len(ocr_text)
+                            self.enhanced_logger.ocr_result(img_obj.image_id, len(ocr_text), ocr_duration_ms)
+                        else:
+                            self.enhanced_logger.ocr_result(img_obj.image_id, 0, ocr_duration_ms)
+
+                    # Add OCR chunks to context for embedding/search
+                    if ocr_chunks:
+                        with self.enhanced_logger.timer(f"Embedding {len(ocr_chunks)} OCR chunks", warn_threshold_ms=5000):
+                            context.chunks.extend(ocr_chunks)
+
+                            # Re-embed OCR chunks so they're searchable
+                            if self.embedder and self.vector_store:
+                                try:
+                                    ocr_texts = [c['content'] for c in ocr_chunks]
+                                    ocr_embeddings = self.embedder.embed_documents(ocr_texts)
+                                    self.vector_store.add_report(ocr_chunks, ocr_embeddings)
+                                    self.enhanced_logger.success(f"Added {len(ocr_chunks)} OCR chunks ({total_chars_extracted} chars) to vector store")
+                                except Exception as e:
+                                    self.enhanced_logger.error(f"Failed to embed OCR chunks", e)
+                    else:
+                        self.enhanced_logger.warning("No text extracted from images via OCR", LogLevel.STANDARD)
+            else:
+                self.enhanced_logger.debug("OCR disabled in config")
+
         # Step 4: Find evidence for each KSB
         evidence_finder = self.tools["find_evidence"]
         search_mode = "hybrid" if self.retriever else "semantic-only"
-        self._log_verbose(f"Evidence search mode: {search_mode}")
+        self.enhanced_logger.info(f"Evidence search mode: {search_mode}")
 
-        for ksb in context.ksb_criteria:
-            ksb_code = ksb.get("code", "")
-            result = evidence_finder.execute(
-                context, ksb_code, ksb.get("pass_criteria", "")
-            )
-            if result.success:
-                context.evidence_map[ksb_code] = result.data.get("evidence", [])
-                search_strategy = result.data.get("search_strategy", "unknown")
-                query_variations = result.data.get("query_variations", 0)
-                self._log_verbose(
-                    f"  {ksb_code}: {len(result.data.get('evidence', []))} chunks found "
-                    f"({search_strategy}, {query_variations} query variations)"
+        total_ksbs = len(context.ksb_criteria)
+        low_evidence_count = 0
+
+        with self.enhanced_logger.timer(f"Evidence search for {total_ksbs} KSBs", warn_threshold_ms=total_ksbs * 1000):
+            for idx, ksb in enumerate(context.ksb_criteria, 1):
+                self.enhanced_logger.progress(idx, total_ksbs, "KSB")
+
+                ksb_code = ksb.get("code", "")
+                result = evidence_finder.execute(
+                    context, ksb_code, ksb.get("pass_criteria", "")
                 )
-        
-        logger.info(f"Analysis complete: {len(context.section_analyses)} sections, "
-                   f"{len(context.image_analyses)} images, "
-                   f"{len(context.evidence_map)} KSBs mapped")
-        
+                if result.success:
+                    evidence = result.data.get("evidence", [])
+                    context.evidence_map[ksb_code] = evidence
+                    search_strategy = result.data.get("search_strategy", "unknown")
+                    query_variations = result.data.get("query_variations", 0)
+
+                    # Count OCR chunks in evidence
+                    ocr_chunk_count = sum(1 for e in evidence if '[OCR from' in e)
+
+                    # Calculate average similarity if available
+                    avg_similarity = None
+                    if evidence and isinstance(evidence[0], dict) and 'similarity' in evidence[0]:
+                        avg_similarity = sum(e.get('similarity', 0) for e in evidence) / len(evidence)
+
+                    # Log evidence stats
+                    self.enhanced_logger.evidence_stats(
+                        ksb_code,
+                        len(evidence),
+                        search_strategy,
+                        query_variations,
+                        ocr_chunk_count,
+                        avg_similarity
+                    )
+
+                    if len(evidence) < 3:
+                        low_evidence_count += 1
+
+        # Log summary metrics
+        analysis_duration = time.time() - analysis_start
+        self.enhanced_logger.metric("total_sections", len(context.section_analyses))
+        self.enhanced_logger.metric("total_images", len(context.image_analyses))
+        self.enhanced_logger.metric("ksbs_mapped", len(context.evidence_map))
+        self.enhanced_logger.metric("ksbs_with_low_evidence", low_evidence_count)
+        self.enhanced_logger.metric("analysis_duration_sec", f"{analysis_duration:.1f}")
+
+        self.enhanced_logger.success(
+            f"Analysis complete: {len(context.section_analyses)} sections, "
+            f"{len(context.image_analyses)} images, "
+            f"{len(context.evidence_map)} KSBs mapped, "
+            f"{low_evidence_count} with low evidence (<3 chunks)"
+        )
+
         return context

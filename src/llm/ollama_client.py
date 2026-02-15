@@ -157,7 +157,61 @@ class OllamaClient:
                     continue
         
         return ''.join(full_response)
-    
+
+    def extract_text_from_image(
+        self,
+        image_base64: str,
+        prompt: str = "Extract all text, code, labels, and metrics from this image. Preserve formatting and structure.",
+        model_override: Optional[str] = None
+    ) -> str:
+        """
+        Extract text from an image using OCR model (e.g., glm-ocr).
+
+        Args:
+            image_base64: Base64-encoded image
+            prompt: Instruction prompt for OCR
+            model_override: Optional model to use (defaults to glm-ocr via config)
+
+        Returns:
+            Extracted text from image
+        """
+        from config import OCR_MODEL, OCR_ENABLED
+
+        if not OCR_ENABLED:
+            logger.debug("OCR is disabled in config")
+            return ""
+
+        ocr_model = model_override or OCR_MODEL
+
+        payload = {
+            "model": ocr_model,
+            "prompt": prompt,
+            "images": [image_base64],
+            "stream": False,
+            "options": {
+                "temperature": 0.1,  # Low temp for accurate extraction
+                "num_predict": 2000,  # Allow longer output for code/charts
+            }
+        }
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            extracted_text = result.get('response', '').strip()
+
+            logger.debug(f"OCR extracted {len(extracted_text)} chars using {ocr_model}")
+            return extracted_text
+
+        except requests.RequestException as e:
+            logger.warning(f"OCR extraction failed with {ocr_model}: {e}")
+            return ""
+
     def is_available(self) -> bool:
         """Check if Ollama and the model are available."""
         try:

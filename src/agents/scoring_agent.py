@@ -8,12 +8,14 @@ Takes analysis results and:
 """
 import json
 import re
+import time
 from typing import Dict, Any, List
 import logging
 
 from .core import BaseAgent, BaseTool, AgentContext, AgentRole, ToolResult
 from ..validation.output_validator import OutputValidator
 from ..prompts.ksb_templates import KSBPromptTemplates, extract_grade_from_evaluation
+from ..utils.logger import create_logger, LogLevel
 from config import ModelConfig
 
 logger = logging.getLogger(__name__)
@@ -262,44 +264,66 @@ class ScoringAgent(BaseAgent):
         super().__init__(llm, AgentRole.SCORING, tools, verbose)
         self.validator = OutputValidator(module_code)
         self.module_code = module_code
+
+        # Initialize enhanced logger
+        from config import LOG_LEVEL
+        log_level = LogLevel.VERBOSE if verbose else LogLevel(LOG_LEVEL)
+        self.enhanced_logger = create_logger("SCORING", log_level, verbose)
     
     def process(self, context: AgentContext) -> AgentContext:
         """Score all KSBs against rubric."""
-        
-        self._log_verbose("Starting scoring phase...")
-        
+
+        self.enhanced_logger.phase("Starting scoring phase...")
+        scoring_start = time.time()
+
         rubric_tool = self.tools["apply_rubric"]
         weight_tool = self.tools["calculate_weights"]
+
+        grade_counts = {"MERIT": 0, "PASS": 0, "REFERRAL": 0}
+        low_confidence_grades = []
         check_tool = self.tools["check_criteria"]
         brief_tool = self.tools["map_to_brief"]
         
         # Step 1: Apply rubric to each KSB
-        for ksb in context.ksb_criteria:
+        total_ksbs = len(context.ksb_criteria)
+        for idx, ksb in enumerate(context.ksb_criteria, 1):
             ksb_code = ksb.get("code", "")
-            self._log_verbose(f"Scoring {ksb_code}...")
+            self.enhanced_logger.progress(idx, total_ksbs, f"KSB {ksb_code}")
             
             # Gather evidence from analysis
             evidence_parts = []
             section_scores = {}
-            
-            # From section analyses
+
+            # From section analyses (take more evidence - up to 5 per section)
             for analysis in context.section_analyses:
                 ksb_evidence = analysis.get("evidence_found", {}).get(ksb_code, [])
                 if ksb_evidence:
-                    evidence_parts.extend(ksb_evidence[:3])
-                
+                    evidence_parts.extend(ksb_evidence[:5])  # Increased from 3 to 5
+
                 if ksb_code in analysis.get("ksb_mappings", []):
                     section_id = analysis.get("section_id", "unknown")
                     clarity = analysis.get("clarity", {}).get("score", 0)
                     accuracy = analysis.get("accuracy", {}).get("score", 0)
                     section_scores[section_id] = (clarity + accuracy) / 2
-            
-            # From evidence map
-            for ev in context.evidence_map.get(ksb_code, [])[:3]:
+
+            # From evidence map (take ALL up to 10, don't truncate content)
+            for ev in context.evidence_map.get(ksb_code, [])[:10]:  # Increased from 3 to 10
                 if isinstance(ev, dict):
-                    evidence_parts.append(ev.get("content", "")[:200])
-            
-            evidence_summary = "\n".join(f"- {e}" for e in evidence_parts[:8])
+                    content = ev.get("content", "")
+                    # Don't truncate - include full content (up to 500 chars for readability)
+                    evidence_parts.append(content[:500] if len(content) > 500 else content)
+                elif isinstance(ev, str):
+                    evidence_parts.append(ev[:500] if len(ev) > 500 else ev)
+
+            # Build evidence summary with ALL evidence (up to 15 items total)
+            evidence_summary = "\n".join(f"- {e}" for e in evidence_parts[:15])  # Increased from 8 to 15
+
+            # DEBUG: Log evidence gathering
+            self.enhanced_logger.debug(
+                f"{ksb_code}: Gathered {len(evidence_parts)} evidence items "
+                f"(total chars: {sum(len(str(e)) for e in evidence_parts)})"
+            )
+
             if not evidence_summary:
                 evidence_summary = "No direct evidence found."
             
@@ -367,7 +391,50 @@ class ScoringAgent(BaseAgent):
                 else:
                     grade = "PASS"
                     confidence = "HIGH" if pass_met else "MEDIUM"
-                
+
+                # Track grade statistics
+                grade_counts[grade] = grade_counts.get(grade, 0) + 1
+                if confidence == "LOW":
+                    low_confidence_grades.append(ksb_code)
+
+                # === DEBUG LOGGING FOR REFERRAL GRADES ===
+                if grade == "REFERRAL":
+                    self.enhanced_logger.warning(f"\n{'='*80}\n🔍 REFERRAL DEBUG: {ksb_code} - {ksb.get('title', '')}\n{'='*80}", LogLevel.STANDARD)
+
+                    # Show evidence chunks breakdown
+                    self.enhanced_logger.warning(f"\n📊 Evidence Chunks Collected: {len(evidence_parts)}", LogLevel.STANDARD)
+                    for idx, ev in enumerate(evidence_parts[:10], 1):  # Show first 10
+                        preview = str(ev)[:200] + "..." if len(str(ev)) > 200 else str(ev)
+                        self.enhanced_logger.warning(f"  [{idx}] {preview}", LogLevel.STANDARD)
+
+                    # Show evidence summary sent to LLM
+                    evidence_preview = evidence_summary[:500] + "..." if len(evidence_summary) > 500 else evidence_summary
+                    self.enhanced_logger.warning(f"\n📝 Evidence Summary Sent to LLM (first 500 chars):\n{evidence_preview}\n", LogLevel.STANDARD)
+
+                    # Show raw LLM response
+                    raw_response = result.data.get("_raw_response", "")
+                    response_preview = raw_response[:500] + "..." if len(raw_response) > 500 else raw_response
+                    self.enhanced_logger.warning(f"\n🤖 LLM Response (first 500 chars):\n{response_preview}\n", LogLevel.STANDARD)
+
+                    # Show validation warnings
+                    if validation:
+                        self.enhanced_logger.warning(f"\n⚠️ Validation Warnings ({len(validation.warnings)}):", LogLevel.STANDARD)
+                        for idx, warning in enumerate(validation.warnings, 1):
+                            self.enhanced_logger.warning(f"  {idx}. {warning}", LogLevel.STANDARD)
+                        self.enhanced_logger.warning(f"\n🎯 Validation Action: {validation.suggested_action}", LogLevel.STANDARD)
+                        self.enhanced_logger.warning(f"📊 Validation Confidence: {validation.confidence_score:.2f}\n", LogLevel.STANDARD)
+                    else:
+                        self.enhanced_logger.warning("\n⚠️ No validation performed\n", LogLevel.STANDARD)
+
+                    # Show extraction details
+                    self.enhanced_logger.warning(f"🔧 Grade Decision Details:", LogLevel.STANDARD)
+                    self.enhanced_logger.warning(f"  - Pass criteria met: {pass_met}", LogLevel.STANDARD)
+                    self.enhanced_logger.warning(f"  - Merit criteria met: {merit_met}", LogLevel.STANDARD)
+                    self.enhanced_logger.warning(f"  - Evidence strength: {evidence_strength}", LogLevel.STANDARD)
+                    self.enhanced_logger.warning(f"  - Evidence count: {len(evidence_parts)}", LogLevel.STANDARD)
+                    self.enhanced_logger.warning(f"  - Confidence: {confidence}", LogLevel.STANDARD)
+                    self.enhanced_logger.warning(f"\n{'='*80}\n", LogLevel.STANDARD)
+
                 # Calculate weighted score
                 avg_score = sum(section_scores.values()) / len(section_scores) if section_scores else 2.5
                 weighted = avg_score / 5
@@ -389,7 +456,17 @@ class ScoringAgent(BaseAgent):
                 if validation and validation.suggested_action == 'flag_for_review':
                     ksb_score_entry["flagged"] = True
                     ksb_score_entry["validation_warnings"] = validation.warnings
-                    self._log_verbose(f"⚠️ Flagged {ksb_code} for review: {len(validation.warnings)} warnings")
+                    self.enhanced_logger.warning(f"{ksb_code} flagged for review: {len(validation.warnings)} warnings", LogLevel.STANDARD)
+
+                # Log grade decision
+                evidence_count = len(evidence_parts)
+                self.enhanced_logger.grade_decision(
+                    ksb_code,
+                    grade,
+                    confidence,
+                    evidence_count,
+                    pass_met
+                )
 
                 context.ksb_scores[ksb_code] = ksb_score_entry
             else:
@@ -420,7 +497,27 @@ class ScoringAgent(BaseAgent):
             "patterns": check_result.data if check_result.success else {},
             "brief_mapping": brief_result.data if brief_result.success else {}
         }
-        
+
+        # Log scoring summary
+        scoring_duration = time.time() - scoring_start
+        self.enhanced_logger.metric("scoring_duration_sec", f"{scoring_duration:.1f}")
+        self.enhanced_logger.metric("merits", grade_counts.get("MERIT", 0))
+        self.enhanced_logger.metric("passes", grade_counts.get("PASS", 0))
+        self.enhanced_logger.metric("referrals", grade_counts.get("REFERRAL", 0))
+        self.enhanced_logger.metric("low_confidence_count", len(low_confidence_grades))
+
+        if low_confidence_grades:
+            self.enhanced_logger.warning(
+                f"Low-confidence grades for: {', '.join(low_confidence_grades)}",
+                LogLevel.STANDARD
+            )
+
+        self.enhanced_logger.success(
+            f"Scoring complete: {grade_counts.get('MERIT', 0)} MERIT, "
+            f"{grade_counts.get('PASS', 0)} PASS, {grade_counts.get('REFERRAL', 0)} REFERRAL "
+            f"({len(low_confidence_grades)} low-confidence)"
+        )
+
         logger.info(f"Scoring complete: {len(context.ksb_scores)} KSBs scored, "
                    f"recommendation: {check_result.data.get('recommendation', 'UNKNOWN')}")
         

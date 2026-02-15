@@ -27,6 +27,15 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral:7b")  # ✅ Recommended 7B bas
 
 OLLAMA_TIMEOUT = 180  # Increased for larger models
 
+# OCR settings (for extracting text from images/charts/code screenshots)
+OCR_MODEL = os.getenv("OCR_MODEL", "glm-ocr")  # GLM-OCR for document understanding
+OCR_ENABLED = os.getenv("OCR_ENABLED", "true").lower() == "true"  # Toggle OCR preprocessing
+
+# Logging settings
+LOG_LEVEL = os.getenv("LOG_LEVEL", "standard")  # minimal, standard, verbose
+ENABLE_PERFORMANCE_LOGGING = os.getenv("ENABLE_PERFORMANCE_LOGGING", "true").lower() == "true"
+SLOW_OPERATION_THRESHOLD_MS = float(os.getenv("SLOW_OPERATION_THRESHOLD_MS", "3000"))  # Warn if operation exceeds this
+
 # Embedding settings
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDING_DIMENSION = 384
@@ -118,8 +127,15 @@ class ModelConfig:
         "gemma3:4b": {
             "temperature": 0.3,   # Higher temp for small model
             "max_tokens": 1500,
-            "strictness_adjustment": "lenient",  
+            "strictness_adjustment": "lenient",
             "notes": "4B params - BELOW MINIMUM, known to hallucinate"
+        },
+
+        "glm-ocr": {
+            "temperature": 0.1,   # Low temp for accurate OCR extraction
+            "max_tokens": 2000,   # Higher for code/chart extraction
+            "strictness_adjustment": "balanced",
+            "notes": "GLM-OCR specialist for code/charts/diagrams - document understanding"
         },
 
         # ═══════════════════════════════════════════════════════════════════════

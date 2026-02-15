@@ -48,18 +48,52 @@ class ImageProcessor:
     """
     
     SUPPORTED_FORMATS = {'png', 'jpeg', 'jpg', 'gif', 'webp', 'bmp'}
-    
-    def __init__(self, max_size: Tuple[int, int] = (1024, 1024)):
+
+    def __init__(self, max_size: Tuple[int, int] = (1024, 1024), ollama_client=None):
         """
         Initialize the image processor.
-        
+
         Args:
             max_size: Maximum (width, height) for images sent to vision model
+            ollama_client: Optional OllamaClient for OCR capabilities
         """
         if Image is None:
             raise ImportError("Pillow is required. Install with: pip install Pillow")
-        
+
         self.max_size = max_size
+        self.ollama_client = ollama_client
+
+    def extract_text_with_ocr(self, image: ProcessedImage) -> str:
+        """
+        Extract text from image using GLM-OCR.
+
+        Args:
+            image: ProcessedImage with base64_data
+
+        Returns:
+            Extracted text, or empty string if OCR fails/disabled
+        """
+        from config import OCR_ENABLED
+
+        if not OCR_ENABLED or not self.ollama_client:
+            return ""
+
+        if not hasattr(image, 'base64_data') or not image.base64_data:
+            logger.debug(f"Image {getattr(image, 'image_id', 'unknown')} has no base64_data")
+            return ""
+
+        try:
+            ocr_text = self.ollama_client.extract_text_from_image(
+                image.base64_data,
+                prompt="Extract all text, code, labels, and metrics from this image. "
+                       "Preserve formatting and structure."
+            )
+            return ocr_text.strip()
+
+        except Exception as e:
+            image_id = getattr(image, 'image_id', 'unknown')
+            logger.warning(f"OCR failed for {image_id}: {e}")
+            return ""
     
     def process_docx_images(
         self,
