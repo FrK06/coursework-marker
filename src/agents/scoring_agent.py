@@ -495,16 +495,20 @@ class ScoringAgent(BaseAgent):
                 avg_score = sum(section_scores.values()) / len(section_scores) if section_scores else 2.5
                 weighted = avg_score / 5
 
+                # Get metadata from AnalysisAgent (query variations, search strategy, OCR chunks)
+                metadata = context.evidence_metadata.get(ksb_code, {})
+
                 # Build audit trail for transparency/explainability
                 audit_trail = {
                     'evidence': {
                         'chunks': [],
-                        'total_chunks_retrieved': len(context.evidence_map.get(ksb_code, [])),
+                        'total_chunks_retrieved': metadata.get('total_chunks', len(context.evidence_map.get(ksb_code, []))),
                         'chunks_after_filtering': len(evidence_parts),
+                        'ocr_chunks_added': metadata.get('ocr_chunks', 0),
                         'search_strategy': {
-                            'query_variations': 0,  # Will be populated from evidence metadata
-                            'mode': 'hybrid',  # Default assumption
-                            'boilerplate_filtered': 0
+                            'query_variations': metadata.get('query_variations', 0),  # Already an int count from EvidenceFinder
+                            'mode': metadata.get('search_strategy', 'hybrid'),
+                            'boilerplate_filtered': 0  # Will be calculated below
                         }
                     },
                     'llm_evaluation': {
@@ -549,9 +553,10 @@ class ScoringAgent(BaseAgent):
                         }
                         audit_trail['evidence']['chunks'].append(chunk_entry)
 
-                # Calculate boilerplate filtering (difference between retrieved and used)
-                audit_trail['evidence']['search_strategy']['boilerplate_filtered'] = \
-                    audit_trail['evidence']['total_chunks_retrieved'] - audit_trail['evidence']['chunks_after_filtering']
+                # Calculate boilerplate filtering (prevent negative values from OCR chunks added after retrieval)
+                total_before_ocr = audit_trail['evidence']['total_chunks_retrieved']
+                chunks_used = audit_trail['evidence']['chunks_after_filtering']
+                audit_trail['evidence']['search_strategy']['boilerplate_filtered'] = max(0, total_before_ocr - chunks_used)
 
                 # Build KSB score entry
                 ksb_score_entry = {

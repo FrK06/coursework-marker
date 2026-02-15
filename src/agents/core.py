@@ -42,6 +42,7 @@ class AgentContext:
     image_analyses: List[Dict[str, Any]] = field(default_factory=list)
     table_analyses: List[Dict[str, Any]] = field(default_factory=list)
     evidence_map: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    evidence_metadata: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # Stores query_variations, search_strategy, etc.
     
     # Scoring results (populated by Scoring Agent)
     ksb_scores: Dict[str, Dict[str, Any]] = field(default_factory=dict)

@@ -270,18 +270,316 @@ class QueryExpander:
     def extract_key_concepts(self, text: str) -> List[str]:
         """Extract key concepts from text for focused retrieval."""
         concepts = []
-        
+
         patterns = [
             r'\b(?:using|with|via|through)\s+([A-Z][a-zA-Z0-9\s]+)',
             r'\b([A-Z]{2,})\b',
             r'\b(\d+(?:\.\d+)?)\s*(?:GB|MB|TB|ms|seconds|hours)',
         ]
-        
+
         for pattern in patterns:
             matches = re.findall(pattern, text)
             concepts.extend([m.strip() for m in matches if len(m.strip()) > 1])
-        
+
         return list(set(concepts))[:5]
+
+    def get_base_queries(self, ksb_code: str, ksb_description: str) -> List[str]:
+        """
+        Generate 2-3 focused base queries for a KSB before expansion.
+
+        Different query strategies for different KSB types:
+        - Statistical KSBs: methodology, results, business linkage
+        - Infrastructure KSBs: architecture, implementation, justification
+        - Ethics/compliance KSBs: legal requirements, implementation, risk assessment
+        - Other KSBs: split KSB_CONTEXT terms into thematic groups
+        """
+        ksb_upper = ksb_code.upper()
+        base_queries = []
+
+        # Statistical KSBs - target methodology, results, business linkage
+        if ksb_upper in ['K22', 'K26', 'S21', 'S22']:
+            if ksb_upper == 'K22':  # Hypothesis testing
+                base_queries = [
+                    "hypothesis test selection assumptions normality equal variance",
+                    "effect size confidence interval p-value significance results",
+                    "business decision practical significance recommendation interpretation"
+                ]
+            elif ksb_upper == 'K26':  # Scientific method
+                base_queries = [
+                    "experimental design control variables confounding bias",
+                    "validity reliability measurement internal external",
+                    "scientific method hypothesis formulation testing"
+                ]
+            elif ksb_upper == 'S21':  # Uncertainty quantification
+                base_queries = [
+                    "confidence interval error bars margin error uncertainty",
+                    "effect size Cohen variability sampling error",
+                    "sensitivity analysis limitation robustness"
+                ]
+            elif ksb_upper == 'S22':  # EDA and hypothesis testing to business decisions
+                base_queries = [
+                    "exploratory data analysis distribution summary statistics",
+                    "hypothesis testing statistical test strategy selection",
+                    "business decision recommendation quantify impact"
+                ]
+
+        # Infrastructure KSBs - target architecture, implementation, justification
+        elif ksb_upper in ['K2', 'S1', 'K15', 'K16', 'S13', 'S18', 'S19']:
+            if ksb_upper == 'K2':  # Data infrastructure & storage
+                base_queries = [
+                    "storage architecture database design scalability",
+                    "data pipeline processing infrastructure implementation",
+                    "justification trade-off performance cost organizational impact"
+                ]
+            elif ksb_upper == 'S1':  # Storage architecture design
+                base_queries = [
+                    "storage architecture data architecture design pattern",
+                    "scalability security access control replication",
+                    "database schema modelling normalization optimization"
+                ]
+            elif ksb_upper == 'K15':  # Engineering artefacts
+                base_queries = [
+                    "dashboard build engineering artefact implementation",
+                    "reproducibility versioning modular code quality",
+                    "screenshot evidence demonstration functionality"
+                ]
+            elif ksb_upper == 'K16':  # High performance computing
+                base_queries = [
+                    "GPU CPU high performance architecture compute",
+                    "parallel processing optimization benchmark throughput",
+                    "hardware selection justification cost performance"
+                ]
+            elif ksb_upper == 'S13':  # Resource selection
+                base_queries = [
+                    "platform tool selection architecture framework",
+                    "Python SQL Power BI technology stack",
+                    "justification rationale constraints requirements"
+                ]
+            elif ksb_upper == 'S18':  # Monitoring and performance
+                base_queries = [
+                    "monitoring dashboard infrastructure diagram pipeline",
+                    "performance metrics health freshness data lineage",
+                    "alerting observability logging telemetry"
+                ]
+            elif ksb_upper == 'S19':  # Scalable infrastructure
+                base_queries = [
+                    "scalable infrastructure elasticity auto-scaling",
+                    "benchmarking performance testing load capacity",
+                    "cloud deployment distributed architecture"
+                ]
+
+        # Ethics/compliance KSBs - target legal, implementation, risk
+        elif ksb_upper in ['K24', 'B3', 'K9', 'K12']:
+            if ksb_upper in ['K24', 'B3']:  # GDPR and data protection
+                base_queries = [
+                    "GDPR data protection privacy legal requirements compliance",
+                    "anonymisation pseudonymisation access control retention",
+                    "DPIA risk assessment mitigation data subject rights"
+                ]
+            elif ksb_upper == 'K9':  # Legal and ethical considerations
+                base_queries = [
+                    "legal regulatory GDPR DPIA lawful basis",
+                    "ethical privacy IP licensing data protection",
+                    "risk assessment compliance audit trail"
+                ]
+            elif ksb_upper == 'K12':  # Social and ethical context
+                base_queries = [
+                    "ethical issues automation misuse harm consequences",
+                    "bias fairness transparency explainability",
+                    "human-in-the-loop oversight governance accountability"
+                ]
+
+        # Visualization/analysis KSBs - target design, implementation, insights
+        elif ksb_upper in ['S9', 'K5', 'S10', 'S26']:
+            if ksb_upper == 'S9':  # Data manipulation and visualization
+                base_queries = [
+                    "data manipulation filtering aggregation transformation",
+                    "visualization chart graph dashboard Power BI matplotlib",
+                    "analysis insight interpretation pattern trend"
+                ]
+            elif ksb_upper == 'K5':  # Analysis and research
+                base_queries = [
+                    "exploratory data analysis EDA visualization distribution",
+                    "research methodology business need requirements",
+                    "insight discovery pattern identification recommendation"
+                ]
+            elif ksb_upper == 'S10':  # Dataset selection
+                base_queries = [
+                    "dataset selection methodology suitability appropriateness",
+                    "business problem rationale justification alignment",
+                    "constraints limitations data quality availability"
+                ]
+            elif ksb_upper == 'S26':  # AI/DS techniques
+                base_queries = [
+                    "AI technique DS technique algorithm method approach",
+                    "visual analytics segmentation forecasting anomaly detection",
+                    "evaluation metric performance accuracy effectiveness"
+                ]
+
+        # Data quality KSBs - target validation, cleaning, documentation
+        elif ksb_upper in ['S17', 'K20', 'K27']:
+            if ksb_upper == 'S17':  # Data curation and quality
+                base_queries = [
+                    "data quality validation schema check consistency",
+                    "cleaning duplicate missing values imputation",
+                    "data dictionary documentation metadata"
+                ]
+            elif ksb_upper == 'K20':  # Data landscape
+                base_queries = [
+                    "data types collection sources acquisition",
+                    "schema metadata structure format",
+                    "instrumentation telemetry event logging"
+                ]
+            elif ksb_upper == 'K27':  # Data product design
+                base_queries = [
+                    "data product specification requirements design",
+                    "stakeholder needs user stories acceptance criteria",
+                    "lifecycle deployment maintenance iteration"
+                ]
+
+        # Programming/engineering KSBs - target code, tools, practices
+        elif ksb_upper in ['K18', 'K25', 'S15', 'S25']:
+            if ksb_upper == 'K18':  # Programming and data engineering
+                base_queries = [
+                    "programming code Python SQL pipeline implementation",
+                    "data engineering ETL transformation processing",
+                    "best practices modular testing error handling"
+                ]
+            elif ksb_upper == 'K25':  # ML libraries
+                base_queries = [
+                    "machine learning libraries PyTorch TensorFlow Keras",
+                    "framework selection model implementation training",
+                    "library usage API documentation examples"
+                ]
+            elif ksb_upper == 'S15':  # Deployment and POC
+                base_queries = [
+                    "deployment service platform production environment",
+                    "proof of concept POC prototype demonstration",
+                    "engineering artefact build pipeline CI/CD"
+                ]
+            elif ksb_upper == 'S25':  # Engineering practices
+                base_queries = [
+                    "version control Git testing unit integration",
+                    "modular code reproducibility documentation",
+                    "CI/CD pipeline automation deployment"
+                ]
+
+        # Communication/collaboration KSBs - target documentation, presentation, sharing
+        elif ksb_upper in ['S23', 'B7', 'S5', 'K21', 'S3']:
+            if ksb_upper in ['S23', 'B7']:  # Best practices and dissemination
+                base_queries = [
+                    "best practice documentation guideline standard",
+                    "sharing dissemination knowledge transfer presentation",
+                    "reflection lessons learned template show-and-tell"
+                ]
+            elif ksb_upper == 'S5':  # Stakeholder communication
+                base_queries = [
+                    "stakeholder communication presentation reporting",
+                    "engagement collaboration feedback requirements",
+                    "non-technical audience visualization dashboard"
+                ]
+            elif ksb_upper == 'K21':  # Team support
+                base_queries = [
+                    "team support collaboration handover knowledge transfer",
+                    "runbook documentation adoption onboarding",
+                    "stakeholder engagement communication alignment"
+                ]
+            elif ksb_upper == 'S3':  # Requirements elicitation
+                base_queries = [
+                    "requirements elicitation gathering analysis",
+                    "user stories acceptance criteria functional non-functional",
+                    "stakeholder workshop interview prioritization"
+                ]
+
+        # Business/strategy KSBs - target objectives, value, decisions
+        elif ksb_upper in ['K1', 'S16', 'K6', 'K8', 'S6']:
+            if ksb_upper == 'K1':  # Business objectives and methodology
+                base_queries = [
+                    "business objective problem framing value proposition",
+                    "AI methodology ML methodology approach strategy",
+                    "business case ROI justification alignment"
+                ]
+            elif ksb_upper == 'S16':  # Requirements and governance
+                base_queries = [
+                    "requirements data management governance policy",
+                    "cloud strategy security compliance",
+                    "stakeholder alignment approval sign-off"
+                ]
+            elif ksb_upper == 'K6':  # Agile and iterative delivery
+                base_queries = [
+                    "iterative incremental agile sprint delivery",
+                    "MVP minimum viable product prototype feedback",
+                    "iteration refinement improvement evolution"
+                ]
+            elif ksb_upper == 'K8':  # Policy and standards
+                base_queries = [
+                    "policy standard guideline organizational framework",
+                    "compliance SDLC governance audit",
+                    "procedure protocol best practice"
+                ]
+            elif ksb_upper == 'S6':  # Direction and innovation
+                base_queries = [
+                    "direction roadmap strategy vision",
+                    "innovation trends emerging technology",
+                    "research literature industry benchmark"
+                ]
+
+        # Professional development KSBs - target learning, growth, trends
+        elif ksb_upper in ['B5', 'B4', 'B8', 'K11', 'K29']:
+            if ksb_upper == 'B5':  # CPD
+                base_queries = [
+                    "CPD professional development learning training",
+                    "course certification workshop conference",
+                    "skill development knowledge acquisition growth"
+                ]
+            elif ksb_upper == 'B4':  # Initiative and ownership
+                base_queries = [
+                    "initiative responsibility ownership accountability",
+                    "challenge problem-solving proactive",
+                    "iteration improvement continuous learning"
+                ]
+            elif ksb_upper == 'B8':  # Trends and research
+                base_queries = [
+                    "trends innovation emerging technology research",
+                    "literature references academic paper journal",
+                    "industry benchmark state-of-the-art"
+                ]
+            elif ksb_upper == 'K11':  # AI/DS roles and society
+                base_queries = [
+                    "AI roles DS roles DE roles responsibilities",
+                    "industry society impact lifecycle governance",
+                    "career pathway profession ethics"
+                ]
+            elif ksb_upper == 'K29':  # Accessibility
+                base_queries = [
+                    "accessibility inclusive design WCAG standards",
+                    "usability assistive technology screen reader",
+                    "user experience disability compliance"
+                ]
+
+        # Data integration KSBs
+        elif ksb_upper == 'K4':  # Data extraction and linkage
+            base_queries = [
+                "data extraction linkage multiple systems integration",
+                "schema join API data lineage mapping",
+                "ETL pipeline transformation consolidation"
+            ]
+
+        # If no specific pattern, generate from KSB_CONTEXT terms
+        if not base_queries and ksb_upper in self.KSB_CONTEXT:
+            terms = self.KSB_CONTEXT[ksb_upper]
+            # Split terms into 2-3 thematic groups
+            group_size = max(2, len(terms) // 3)
+            base_queries = [
+                ' '.join(terms[i:i+group_size])
+                for i in range(0, len(terms), group_size)
+            ][:3]
+
+        # Fallback: use KSB description itself as base query
+        if not base_queries:
+            base_queries = [ksb_description[:100]]
+
+        return base_queries
 
 
 class Retriever:
@@ -469,11 +767,41 @@ class Retriever:
     def retrieve_for_criterion(
         self, criterion_text: str, criterion_id: str = ""
     ) -> RetrievalResult:
-        """Retrieve relevant report chunks for a single criterion."""
+        """
+        Retrieve relevant report chunks for a single criterion.
+
+        Uses multi-base query strategy:
+        1. Generate 2-3 focused base queries from get_base_queries()
+        2. Expand each base query with expand_query()
+        3. Merge and deduplicate all variations
+        4. Apply hybrid search and filtering
+        """
+        # Generate 2-3 targeted base queries for this KSB
+        base_queries = self.query_expander.get_base_queries(criterion_id, criterion_text)
+
+        # Expand each base query separately
+        all_queries = []
+        for base_query in base_queries:
+            expanded = self.query_expander.expand_query(base_query, criterion_id)
+            all_queries.extend(expanded)
+
+        # Also include original criterion text expansion (fallback)
         queries = self.query_expander.expand_query(criterion_text[:500], criterion_id)
+        all_queries.extend(queries)
+
+        # Add key concepts from criterion text
         concepts = self.query_expander.extract_key_concepts(criterion_text)
-        queries.extend(concepts)
-        
+        all_queries.extend(concepts)
+
+        # Deduplicate queries
+        seen = set()
+        queries = []
+        for q in all_queries:
+            q_lower = q.lower().strip()
+            if q_lower not in seen and len(q_lower) > 2:
+                seen.add(q_lower)
+                queries.append(q)
+
         all_results = self._hybrid_search(queries, self.report_top_k)
         
         sorted_results = sorted(

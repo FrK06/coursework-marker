@@ -617,6 +617,14 @@ class AnalysisAgent(BaseAgent):
                     # Count OCR chunks in evidence
                     ocr_chunk_count = sum(1 for e in evidence if '[OCR from' in e)
 
+                    # Store metadata for audit trail (used by ScoringAgent)
+                    context.evidence_metadata[ksb_code] = {
+                        'search_strategy': search_strategy,
+                        'query_variations': query_variations,
+                        'total_chunks': len(evidence),
+                        'ocr_chunks': ocr_chunk_count
+                    }
+
                     # Calculate average similarity if available
                     avg_similarity = None
                     if evidence and isinstance(evidence[0], dict) and 'similarity' in evidence[0]:
