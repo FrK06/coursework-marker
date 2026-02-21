@@ -83,7 +83,9 @@ class OutputValidator:
         self,
         evaluation_text: str,
         evidence_text: str,
-        ksb_code: str
+        ksb_code: str,
+        rubric_text: str = "",
+        template_text: str = ""
     ) -> ValidationResult:
         """
         Validate a single KSB evaluation for potential hallucinations.
@@ -177,6 +179,10 @@ class OutputValidator:
             quote_normalized = ' '.join(quote.split()).lower()
             evidence_normalized = ' '.join(evidence_text.split()).lower()
 
+            # Also normalize rubric and template text for comparison
+            rubric_normalized = ' '.join(rubric_text.split()).lower() if rubric_text else ""
+            template_normalized = ' '.join(template_text.split()).lower() if template_text else ""
+
             # Check if the quote appears directly in evidence (exact or near-exact match)
             # Use longer substring (10 words or 60% of quote, whichever is shorter)
             words = quote_normalized.split()
@@ -186,22 +192,29 @@ class OutputValidator:
                 # Check multiple substrings to handle partial matches
                 found = False
 
+                # Search across evidence, rubric criteria, and template text
+                search_sources = [evidence_normalized]
+                if rubric_normalized:
+                    search_sources.append(rubric_normalized)
+                if template_normalized:
+                    search_sources.append(template_normalized)
+
                 # Try first N words
                 search_phrase = ' '.join(words[:check_length])
-                if search_phrase in evidence_normalized:
+                if any(search_phrase in source for source in search_sources):
                     found = True
 
                 # Try middle N words if not found
                 if not found and len(words) > check_length:
                     mid_start = max(0, (len(words) - check_length) // 2)
                     search_phrase = ' '.join(words[mid_start:mid_start + check_length])
-                    if search_phrase in evidence_normalized:
+                    if any(search_phrase in source for source in search_sources):
                         found = True
 
                 # Try last N words if still not found
                 if not found and len(words) > check_length:
                     search_phrase = ' '.join(words[-check_length:])
-                    if search_phrase in evidence_normalized:
+                    if any(search_phrase in source for source in search_sources):
                         found = True
 
                 # Only flag if NO substantial substring found AND quote looks like it claims to be from report

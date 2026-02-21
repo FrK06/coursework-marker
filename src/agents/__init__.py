@@ -72,7 +72,7 @@ def create_agent_system(llm, embedder=None, vector_store=None, verbose: bool = F
     Returns:
         Configured AgentOrchestrator
     """
-    analysis_agent = AnalysisAgent(llm, embedder, vector_store, verbose)
+    analysis_agent = AnalysisAgent(llm, embedder, vector_store, verbose, module_code=module_code)
     scoring_agent = ScoringAgent(llm, module_code=module_code, verbose=verbose)
     feedback_agent = FeedbackAgent(llm, verbose)
 

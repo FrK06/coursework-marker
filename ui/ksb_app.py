@@ -451,7 +451,43 @@ def display_results(results: Dict[str, Any]):
     summary = results.get("overall_summary", {})
     
     st.markdown("## 📊 Assessment Results")
-    
+
+    # Content quality warnings
+    content_quality = results.get("content_quality", {})
+    off_topic_images = content_quality.get("off_topic_images", 0)
+    adversarial_tables = content_quality.get("adversarial_tables_detected", 0)
+
+    if adversarial_tables > 0:
+        image_note = ""
+        if off_topic_images > 0:
+            image_note = (
+                f" Additionally, **{off_topic_images}** unrelated image(s) were detected."
+            )
+        st.error(
+            "**⚠️ Adversarial Content Detected**\n\n"
+            "The KSB reflection table contains content unrelated to the module "
+            f"(e.g. off-topic text instead of genuine reflections). "
+            f"**{adversarial_tables}** adversarial table(s) found. "
+            f"Affected KSBs have been automatically referred.{image_note}"
+        )
+    elif off_topic_images > 0:
+        st.error(
+            "**⚠️ Adversarial Content Detected**\n\n"
+            f"**{off_topic_images}** image(s) in the report contain content "
+            "unrelated to the module (e.g. off-topic diagrams or screenshots). "
+            "These images have been excluded from evidence."
+        )
+    elif content_quality.get("quality_flag") == "CRITICAL":
+        st.warning(
+            "**⚠️ Content Quality Issue**\n\n"
+            f"Report contains **{content_quality.get('off_topic_chunks', 0)}** off-topic section(s). "
+            "Manual review recommended."
+        )
+    elif content_quality.get("quality_flag") == "WARNING":
+        st.info(
+            "Some sections contain content with low relevance to the module."
+        )
+
     # Grade cards
     col1, col2, col3, col4 = st.columns(4)
     with col1:

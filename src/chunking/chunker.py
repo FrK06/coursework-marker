@@ -345,9 +345,10 @@ class SmartChunker:
         1. Minimum 200 words per chunk (merge small subsections)
         2. Add parent section context to each chunk (prepended)
         3. Target 15-20 chunks (200-400 words each) for typical 3000-5000 word reports
-        4. Skip chunks <50 words
+        4. Skip chunks <50 words (except tables — tables are always kept)
         """
         result_chunks = []
+        table_chunks = []  # Collect table chunks separately
         chunk_counter = 0
 
         # Track current parent section (level 1 heading)
@@ -402,11 +403,48 @@ class SmartChunker:
                 page_end=current_page_end,
                 section_title=current_section,
                 section_number=current_section_number,
+                chunk_type='prose',
                 has_figure_reference=has_figure_ref,
                 figure_ids=current_figures.copy(),
                 keywords=keywords,
                 parent_section=parent_section,
                 chunk_index=chunk_counter
+            ))
+            chunk_counter += 1
+
+        def create_table_chunk(content: str, page: int, row_count: int, col_count: int):
+            """Helper to create a dedicated table chunk with metadata header."""
+            nonlocal chunk_counter
+
+            # Build metadata header
+            section_display = current_section or parent_section_title or "Unknown"
+            # Try to extract a caption from the first row header
+            lines = content.strip().split('\n')
+            header_row = lines[0] if lines else ""
+            caption = header_row.strip('| ').replace(' | ', ', ')[:80] if header_row else ""
+
+            header = f"[TABLE in {section_display} | {row_count} rows × {col_count} cols"
+            if caption:
+                header += f" | {caption}"
+            header += "]"
+
+            table_content = f"{header}\n{content}"
+            keywords = self.extract_keywords(table_content)
+
+            table_chunks.append(TextChunk(
+                content=table_content,
+                chunk_id=f"{document_id}_table_{chunk_counter}",
+                document_type='report',
+                token_count=self.count_tokens(table_content),
+                page_start=page,
+                page_end=page,
+                section_title=current_section,
+                section_number=current_section_number,
+                chunk_type='table',
+                keywords=keywords,
+                parent_section=parent_section,
+                chunk_index=chunk_counter,
+                metadata={'row_count': row_count, 'col_count': col_count}
             ))
             chunk_counter += 1
 
@@ -418,6 +456,23 @@ class SmartChunker:
             figure_ids = getattr(chunk, 'figure_ids', [])
             has_fig = getattr(chunk, 'has_figure_reference', False)
             section_num = getattr(chunk, 'section_number', None)
+
+            # Handle table chunks as dedicated first-class chunks
+            if chunk_type == 'table':
+                # Flush any accumulated prose before the table
+                create_chunk()
+                content_accumulator = []
+                words_accumulated = 0
+                current_page_start = page
+                current_figures = []
+                has_figure_ref = False
+
+                # Extract row/col counts from metadata
+                chunk_meta = getattr(chunk, 'metadata', {}) or {}
+                row_count = chunk_meta.get('row_count', content.count('\n') + 1)
+                col_count = chunk_meta.get('col_count', (content.split('\n')[0].count('|') - 1) if '|' in content else 0)
+                create_table_chunk(content, page, row_count, col_count)
+                continue
 
             # Detect sections from content if not already a heading
             if chunk_type != 'heading':
@@ -495,8 +550,16 @@ class SmartChunker:
         # Flush remaining content
         create_chunk()
 
-        logger.info(f"Created {len(result_chunks)} report chunks (word-based merging, avg {sum(self.count_words(c.content) for c in result_chunks) // max(len(result_chunks), 1)} words/chunk)")
-        return result_chunks
+        # Combine prose and table chunks, sorted by chunk_index to preserve document order
+        all_chunks = result_chunks + table_chunks
+        all_chunks.sort(key=lambda c: c.chunk_index)
+
+        prose_count = len(result_chunks)
+        table_count = len(table_chunks)
+        total_words = sum(self.count_words(c.content) for c in all_chunks)
+        avg_words = total_words // max(len(all_chunks), 1)
+        logger.info(f"Created {len(all_chunks)} report chunks ({prose_count} prose + {table_count} tables, avg {avg_words} words/chunk)")
+        return all_chunks
     
     def get_chunking_stats(self, chunks: List[TextChunk]) -> Dict[str, Any]:
         """Get statistics about the chunked document."""

@@ -6,7 +6,10 @@ giving the LLM clear understanding of what the student was asked to do.
 """
 import re
 import json
+import logging
 from typing import Dict, Any, Optional, List
+
+logger = logging.getLogger(__name__)
 
 
 class KSBPromptTemplates:
@@ -132,6 +135,7 @@ Search the evidence above and list ALL relevant content:
 - Only quote TEXT that appears VERBATIM in the evidence
 - Link each evidence item to a brief requirement or KSB criterion
 - If no relevant evidence exists, write: **Evidence Found:** NONE
+- When listing evidence, note if any values are placeholders (TBD, TODO, "fill with measured results"). Placeholder values are NOT evidence of execution.
 
 ### STEP 3: ASSESS PASS CRITERIA
 
@@ -430,6 +434,18 @@ Write 2-3 paragraphs covering:
         return cls.SYSTEM_PROMPT_KSB_MARKER
 
 
+def _repair_json(json_str: str) -> str:
+    """Attempt to fix common LLM JSON errors before falling back to regex."""
+    # Remove parenthetical annotations after quoted strings: "text" (partial) -> "text"
+    repaired = re.sub(r'"\s*\([^)]*\)', '"', json_str)
+    # Remove trailing commas before closing brackets/braces
+    repaired = re.sub(r',\s*([}\]])', r'\1', repaired)
+    # Fix single quotes to double quotes (only for obvious cases)
+    if "'" in repaired and '"' not in repaired:
+        repaired = repaired.replace("'", '"')
+    return repaired
+
+
 def extract_grade_from_evaluation(evaluation: str) -> Dict[str, Any]:
     """
     Extract grade and metadata from LLM evaluation output.
@@ -462,50 +478,69 @@ def extract_grade_from_evaluation(evaluation: str) -> Dict[str, Any]:
     # Method 1: Extract JSON block
     json_match = re.search(r'```json\s*(\{[^`]+\})\s*```', evaluation, re.DOTALL)
     if json_match:
+        json_str = json_match.group(1)
+        parsed = None
+        method_name = 'json'
         try:
-            parsed = json.loads(json_match.group(1))
-            if 'grade' in parsed:
-                grade = parsed['grade'].upper().strip()
+            parsed = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            # Try JSON repair before giving up
+            try:
+                repaired = _repair_json(json_str)
+                parsed = json.loads(repaired)
+                method_name = 'json_repaired'
+                logger.info(f"JSON repair fixed extraction (original error: {e})")
+            except json.JSONDecodeError:
+                pass
+        if parsed and 'grade' in parsed:
+            grade = parsed['grade'].upper().strip()
 
-                # Safety net: Detect if LLM copied placeholder text literally
-                if '|' in grade or '<CHOOSE' in grade.upper() or 'OR' in grade:
-                    # Derive grade from criteria_met fields instead
-                    if parsed.get('merit_criteria_met') is True:
-                        grade = 'MERIT'
-                    elif parsed.get('pass_criteria_met') is True:
-                        grade = 'PASS'
-                    else:
-                        grade = 'REFERRAL'
-                    logger.warning(f"LLM output placeholder text in grade field, derived: {grade}")
+            # Safety net: Detect if LLM copied placeholder text literally
+            if '|' in grade or '<CHOOSE' in grade.upper() or 'OR' in grade:
+                # Derive grade from criteria_met fields instead
+                if parsed.get('merit_criteria_met') is True:
+                    grade = 'MERIT'
+                elif parsed.get('pass_criteria_met') is True:
+                    grade = 'PASS'
+                else:
+                    grade = 'REFERRAL'
+                logger.warning(f"LLM output placeholder text in grade field, derived: {grade}")
 
-                if grade in ['PASS', 'MERIT', 'REFERRAL']:
-                    result['grade'] = grade
-                    result['confidence'] = parsed.get('confidence', 'MEDIUM').upper().split('|')[0].strip()  # Handle confidence placeholders too
-                    result['method'] = 'json'
-                    result['pass_criteria_met'] = parsed.get('pass_criteria_met')
-                    result['merit_criteria_met'] = parsed.get('merit_criteria_met')
-                    result['brief_requirements_met'] = parsed.get('brief_requirements_met', [])
-                    result['brief_requirements_missing'] = parsed.get('brief_requirements_missing', [])
-                    result['raw_json'] = parsed
-                    return result
-        except json.JSONDecodeError:
-            pass
-    
+            if grade in ['PASS', 'MERIT', 'REFERRAL']:
+                result['grade'] = grade
+                result['confidence'] = parsed.get('confidence', 'MEDIUM').upper().split('|')[0].strip()
+                result['method'] = method_name
+                result['pass_criteria_met'] = parsed.get('pass_criteria_met')
+                result['merit_criteria_met'] = parsed.get('merit_criteria_met')
+                result['brief_requirements_met'] = parsed.get('brief_requirements_met', [])
+                result['brief_requirements_missing'] = parsed.get('brief_requirements_missing', [])
+                result['raw_json'] = parsed
+                return result
+
     # Method 2: Inline JSON
     inline_json = re.search(r'\{\s*"ksb_code"[^}]+\}', evaluation, re.DOTALL)
     if inline_json:
+        json_str = inline_json.group(0)
+        parsed = None
+        method_name = 'inline_json'
         try:
-            parsed = json.loads(inline_json.group(0))
-            if 'grade' in parsed:
-                grade = parsed['grade'].upper().strip()
-                if grade in ['PASS', 'MERIT', 'REFERRAL']:
-                    result['grade'] = grade
-                    result['confidence'] = parsed.get('confidence', 'MEDIUM').upper()
-                    result['method'] = 'inline_json'
-                    result['raw_json'] = parsed
-                    return result
-        except json.JSONDecodeError:
-            pass
+            parsed = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            try:
+                repaired = _repair_json(json_str)
+                parsed = json.loads(repaired)
+                method_name = 'inline_json_repaired'
+                logger.info(f"JSON repair fixed inline extraction (original error: {e})")
+            except json.JSONDecodeError:
+                pass
+        if parsed and 'grade' in parsed:
+            grade = parsed['grade'].upper().strip()
+            if grade in ['PASS', 'MERIT', 'REFERRAL']:
+                result['grade'] = grade
+                result['confidence'] = parsed.get('confidence', 'MEDIUM').upper()
+                result['method'] = method_name
+                result['raw_json'] = parsed
+                return result
     
     # Method 3: Regex patterns
     patterns = [
@@ -518,7 +553,21 @@ def extract_grade_from_evaluation(evaluation: str) -> Dict[str, Any]:
     for pattern in patterns:
         match = re.search(pattern, evaluation, re.IGNORECASE)
         if match:
-            result['grade'] = match.group(1).upper()
+            regex_grade = match.group(1).upper()
+            # Safety net: if regex says REFERRAL but raw text shows pass evidence, override
+            if regex_grade == 'REFERRAL':
+                eval_lower = evaluation.lower()
+                has_pass_signal = (
+                    '"pass_criteria_met": true' in eval_lower or
+                    '"pass_criteria_met":true' in eval_lower or
+                    re.search(r'"grade"\s*:\s*"PASS"', evaluation, re.IGNORECASE)
+                )
+                if has_pass_signal:
+                    logger.warning(
+                        f"Regex extracted REFERRAL but raw text contains PASS signals — overriding to PASS"
+                    )
+                    regex_grade = 'PASS'
+            result['grade'] = regex_grade
             result['confidence'] = 'MEDIUM'
             result['method'] = 'regex'
             return result

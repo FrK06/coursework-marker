@@ -44,9 +44,9 @@ class StrengthIdentifierTool(BaseTool):
     def __init__(self, llm):
         self.llm = llm
     
-    def execute(self, context: AgentContext, ksb_code: str, grade: str,
+    def execute(self, _context: AgentContext, ksb_code: str, grade: str,
                 section_analyses: List[Dict], evidence: List[str] = None) -> ToolResult:
-        
+
         evidence = evidence or []
         
         # Compile strengths from analyses
@@ -94,7 +94,7 @@ class GapAnalyzerTool(BaseTool):
     def __init__(self, llm):
         self.llm = llm
     
-    def execute(self, context: AgentContext, ksb_code: str, grade: str,
+    def execute(self, _context: AgentContext, ksb_code: str, grade: str,
                 gaps: List[str], pass_criteria: str, merit_criteria: str) -> ToolResult:
         
         target = "PASS" if grade == "REFERRAL" else "MERIT"
@@ -128,7 +128,7 @@ class ImprovementSuggesterTool(BaseTool):
     name = "suggest_improvements"
     description = "Generate specific, actionable improvement suggestions"
     
-    def execute(self, context: AgentContext, gaps: List[str], grade: str) -> ToolResult:
+    def execute(self, _context: AgentContext, gaps: List[str], grade: str) -> ToolResult:
         suggestions = []
         
         for gap in gaps[:3]:
@@ -146,7 +146,7 @@ class FeedbackFormatterTool(BaseTool):
     name = "format_feedback"
     description = "Format strengths and improvements into cohesive feedback"
     
-    def execute(self, context: AgentContext, ksb_code: str, grade: str,
+    def execute(self, _context: AgentContext, ksb_code: str, grade: str,
                 strengths: List[Dict], improvements: List[Dict]) -> ToolResult:
         
         strength_intro = FEEDBACK_TEMPLATES["strength_intro"].get(grade, "")
@@ -211,7 +211,7 @@ class FeedbackAgent(BaseAgent):
         
         for ksb_code, score_data in context.ksb_scores.items():
             grade = score_data.get("grade", "UNKNOWN")
-            ksb_title = score_data.get("ksb_title", "")
+            _ksb_title = score_data.get("ksb_title", "")
             gaps = score_data.get("gaps", [])
             
             self._log_verbose(f"Generating feedback for {ksb_code} ({grade})...")

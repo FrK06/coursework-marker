@@ -15,6 +15,7 @@ import logging
 from .core import BaseAgent, BaseTool, AgentContext, AgentRole, ToolResult
 from ..validation.output_validator import OutputValidator
 from ..prompts.ksb_templates import KSBPromptTemplates, extract_grade_from_evaluation
+from ..criteria.ksb_parser import ADVERSARIAL_REFLECTION_KSBS
 from ..utils.logger import create_logger, LogLevel
 from config import ModelConfig
 
@@ -338,11 +339,61 @@ class ScoringAgent(BaseAgent):
         check_tool = self.tools["check_criteria"]
         brief_tool = self.tools["map_to_brief"]
         
+        # Content quality checks from analysis phase
+        content_quality = context.content_quality or {}
+        quality_flag = content_quality.get("quality_flag", "OK")
+        adversarial_tables = content_quality.get("adversarial_tables", [])
+        auto_referral_ksbs = set()
+
+        if adversarial_tables:
+            affected = ADVERSARIAL_REFLECTION_KSBS.get(self.module_code, [])
+            auto_referral_ksbs = set(affected)
+            self.enhanced_logger.warning(
+                f"Adversarial reflection table detected — auto-REFERRAL for: {', '.join(auto_referral_ksbs)}",
+                LogLevel.STANDARD
+            )
+
+        if quality_flag == "CRITICAL":
+            self.enhanced_logger.warning(
+                "CRITICAL content quality — report contains significant off-topic content",
+                LogLevel.STANDARD
+            )
+
         # Step 1: Apply rubric to each KSB
         total_ksbs = len(context.ksb_criteria)
         for idx, ksb in enumerate(context.ksb_criteria, 1):
             ksb_code = ksb.get("code", "")
             self.enhanced_logger.progress(idx, total_ksbs, f"KSB {ksb_code}")
+
+            # Auto-REFERRAL for KSBs affected by adversarial reflection tables
+            if ksb_code in auto_referral_ksbs:
+                context.ksb_scores[ksb_code] = {
+                    "ksb_title": ksb.get("title", ""),
+                    "grade": "REFERRAL",
+                    "confidence": "HIGH",
+                    "pass_met": False,
+                    "merit_met": False,
+                    "evidence_strength": "weak",
+                    "weighted_score": 0,
+                    "gaps": ["KSB reflection table contains unrelated content — no evidence of reflective practice"],
+                    "rationale": "Auto-REFERRAL: adversarial reflection table detected",
+                    "audit_trail": {
+                        "evidence": {"chunks": [], "total_chunks_retrieved": 0, "chunks_after_filtering": 0,
+                                     "ocr_chunks_added": 0, "search_strategy": {"query_variations": 0, "mode": "skipped", "boilerplate_filtered": 0}},
+                        "llm_evaluation": {"raw_response": "", "prompt_length_chars": 0, "evidence_summary_length": 0,
+                                           "model": getattr(self.llm, 'model', 'unknown')},
+                        "validation": {"action": "auto_referral", "confidence": 1.0, "warnings": ["Adversarial reflection table"], "retried": False},
+                        "grade_decision": {"grade": "REFERRAL", "pass_criteria_met": False, "merit_criteria_met": False,
+                                           "evidence_strength": "weak", "extraction_method": "auto_referral",
+                                           "confidence": "HIGH", "placeholder_count": 0, "placeholder_capped": False}
+                    }
+                }
+                grade_counts["REFERRAL"] = grade_counts.get("REFERRAL", 0) + 1
+                self.enhanced_logger.warning(
+                    f"{ksb_code}: Auto-REFERRAL (adversarial reflection table)",
+                    LogLevel.STANDARD
+                )
+                continue
             
             # Gather evidence from analysis
             evidence_parts = []
@@ -364,8 +415,13 @@ class ScoringAgent(BaseAgent):
             for ev in context.evidence_map.get(ksb_code, [])[:10]:  # Increased from 3 to 10
                 if isinstance(ev, dict):
                     content = ev.get("content", "")
-                    # Don't truncate - include full content (up to 500 chars for readability)
-                    evidence_parts.append(content[:500] if len(content) > 500 else content)
+                    # Truncate for readability (up to 500 chars)
+                    content = content[:500] if len(content) > 500 else content
+                    # Add context note for table chunks so the LLM understands significance
+                    chunk_type = ev.get("chunk_type", "") or ev.get("metadata", {}).get("chunk_type", "")
+                    if chunk_type == "table" or content.lstrip().startswith("[TABLE"):
+                        content = "[NOTE: This is a data table from the student's report. Check if values are actual results or TBD/placeholders.]\n" + content
+                    evidence_parts.append(content)
                 elif isinstance(ev, str):
                     evidence_parts.append(ev[:500] if len(ev) > 500 else ev)
 
@@ -380,7 +436,42 @@ class ScoringAgent(BaseAgent):
 
             if not evidence_summary:
                 evidence_summary = "No direct evidence found."
-            
+
+            # Placeholder/TBD detection — relevance-weighted scanning
+            # Only count placeholders from chunks that are actually relevant to this KSB
+            placeholder_indicators = [
+                'tbd', 'todo', '[placeholder]', 'fill with measured results',
+                'replace with your', 'insert your', 'add your', '(example)',
+                'example pipeline', 'example architecture', 'to be determined',
+                'to be completed', 'not yet', 'pending results'
+            ]
+            weighted_placeholder_count = 0.0
+            raw_placeholder_count = 0
+            for ev in context.evidence_map.get(ksb_code, [])[:10]:
+                if isinstance(ev, dict):
+                    ev_text = ev.get("content", "").lower()
+                    relevance = ev.get("relevance", ev.get("similarity", 0))
+                    # Weight: 1.0 if highly relevant, 0.5 if moderate, 0.0 if weak
+                    if relevance >= 0.15:
+                        weight = 1.0
+                    elif relevance >= 0.08:
+                        weight = 0.5
+                    else:
+                        weight = 0.0
+                    chunk_hits = sum(ev_text.count(ind) for ind in placeholder_indicators)
+                    raw_placeholder_count += chunk_hits
+                    weighted_placeholder_count += chunk_hits * weight
+
+            placeholder_count = weighted_placeholder_count
+            has_placeholders = weighted_placeholder_count >= 5
+
+            if has_placeholders:
+                self.enhanced_logger.warning(
+                    f"{ksb_code}: {weighted_placeholder_count:.1f} weighted placeholder hits "
+                    f"({raw_placeholder_count} raw) — grade will be capped at PASS",
+                    LogLevel.STANDARD
+                )
+
             # Apply rubric (with validation and retry)
             self._log_tool_call("apply_rubric", {"ksb": ksb_code})
             result = rubric_tool.execute(
@@ -400,8 +491,12 @@ class ScoringAgent(BaseAgent):
             was_retried = False  # Track if we retried due to validation failure
             if result.success and "_raw_response" in result.data:
                 raw_response = result.data.get("_raw_response", "")
+                # Build rubric text for template-echo detection in validator
+                rubric_text = f"{ksb.get('pass_criteria', '')} {ksb.get('merit_criteria', '')} {ksb.get('referral_criteria', '')}"
                 validation = self.validator.validate_evaluation(
-                    raw_response, evidence_summary, ksb_code
+                    raw_response, evidence_summary, ksb_code,
+                    rubric_text=rubric_text,
+                    template_text=KSBPromptTemplates.KSB_EVALUATION_WITH_BRIEF_PROMPT[:500]
                 )
 
                 self._log_verbose(
@@ -427,7 +522,9 @@ class ScoringAgent(BaseAgent):
                     # Re-validate
                     if result.success and "_raw_response" in result.data:
                         validation = self.validator.validate_evaluation(
-                            result.data.get("_raw_response", ""), evidence_summary, ksb_code
+                            result.data.get("_raw_response", ""), evidence_summary, ksb_code,
+                            rubric_text=rubric_text,
+                            template_text=KSBPromptTemplates.KSB_EVALUATION_WITH_BRIEF_PROMPT[:500]
                         )
                         self._log_verbose(f"Retry validation: {validation.suggested_action}")
 
@@ -436,17 +533,55 @@ class ScoringAgent(BaseAgent):
                 pass_met = data.get("pass_assessment", {}).get("met", False)
                 merit_met = data.get("merit_assessment", {}).get("met", False)
                 evidence_strength = data.get("evidence_strength", "weak")
-                
-                # Determine grade
+
+                # Get LLM's stated confidence (from the extracted JSON)
+                llm_confidence = data.get("pass_assessment", {}).get("confidence", "medium").upper()
+
+                # Determine grade and rule-based confidence
                 if not pass_met:
                     grade = "REFERRAL"
-                    confidence = "HIGH" if evidence_strength == "weak" else "MEDIUM"
+                    rule_confidence = "HIGH" if evidence_strength == "weak" else "MEDIUM"
                 elif merit_met and evidence_strength != "weak":
                     grade = "MERIT"
-                    confidence = "HIGH" if evidence_strength == "strong" else "MEDIUM"
+                    rule_confidence = "HIGH" if evidence_strength == "strong" else "MEDIUM"
                 else:
                     grade = "PASS"
-                    confidence = "HIGH" if pass_met else "MEDIUM"
+                    rule_confidence = "HIGH" if pass_met else "MEDIUM"
+
+                # Use the LOWER of LLM confidence and rule-based confidence
+                confidence_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+                confidence = min(
+                    llm_confidence if llm_confidence in confidence_rank else "MEDIUM",
+                    rule_confidence,
+                    key=lambda c: confidence_rank.get(c, 1)
+                )
+
+                # Placeholder grade capping: if evidence has TBD/placeholder content, cap at PASS
+                if has_placeholders and grade == "MERIT":
+                    grade = "PASS"
+                    confidence = min(confidence, "MEDIUM", key=lambda c: confidence_rank.get(c, 1))
+                    data.setdefault("gaps", []).append(
+                        "Evidence contains placeholder/TBD values indicating methodology was planned but not executed"
+                    )
+                    self.enhanced_logger.warning(
+                        f"{ksb_code}: Grade capped MERIT → PASS due to {placeholder_count:.1f} weighted placeholder hits",
+                        LogLevel.STANDARD
+                    )
+
+                # Safety net: low-confidence REFERRAL with placeholder evidence is likely
+                # a false negative — the LLM was confused by TBD values, not genuinely missing work
+                if grade == "REFERRAL" and confidence == "LOW" and raw_placeholder_count > 0:
+                    grade = "PASS"
+                    confidence = "LOW"
+                    data.setdefault("gaps", []).append(
+                        "Upgraded from REFERRAL: low confidence + placeholder content suggests "
+                        "methodology exists but results are incomplete"
+                    )
+                    self.enhanced_logger.warning(
+                        f"{ksb_code}: Safety net: REFERRAL → PASS (LOW confidence + "
+                        f"{raw_placeholder_count} raw placeholder hits)",
+                        LogLevel.STANDARD
+                    )
 
                 # Track grade statistics
                 grade_counts[grade] = grade_counts.get(grade, 0) + 1
@@ -529,9 +664,17 @@ class ScoringAgent(BaseAgent):
                         'merit_criteria_met': merit_met,
                         'evidence_strength': evidence_strength,
                         'extraction_method': data.get('_extraction_method', 'unknown'),
-                        'confidence': confidence
+                        'confidence': confidence,
+                        'placeholder_count': placeholder_count,
+                        'placeholder_capped': has_placeholders and grade == "PASS" and merit_met
                     }
                 }
+
+                # Add content quality warning to audit trail if CRITICAL
+                if quality_flag == "CRITICAL":
+                    audit_trail['validation']['warnings'].append(
+                        "Report contains significant off-topic content — grades should be reviewed"
+                    )
 
                 # Populate evidence chunks with actual text and metadata
                 for ev in context.evidence_map.get(ksb_code, [])[:10]:
@@ -612,10 +755,28 @@ class ScoringAgent(BaseAgent):
         # Step 4: Map to brief
         brief_result = brief_tool.execute(context, all_grades)
         
+        # Build content quality warnings for overall summary
+        content_warnings = []
+        if adversarial_tables:
+            content_warnings.append(
+                "INTEGRITY WARNING: KSB reflection table contains content unrelated to the module. "
+                f"Affected KSBs ({', '.join(auto_referral_ksbs)}) have been referred."
+            )
+        if quality_flag == "CRITICAL":
+            content_warnings.append(
+                "CONTENT QUALITY: Report contains sections with content unrelated to the module subject. "
+                "Manual review recommended."
+            )
+        elif quality_flag == "WARNING":
+            content_warnings.append(
+                "Note: Some sections contain content with low relevance to the module."
+            )
+
         context.overall_scores = {
             "weighted": weight_result.data if weight_result.success else {},
             "patterns": check_result.data if check_result.success else {},
-            "brief_mapping": brief_result.data if brief_result.success else {}
+            "brief_mapping": brief_result.data if brief_result.success else {},
+            "content_warnings": content_warnings
         }
 
         # Log scoring summary

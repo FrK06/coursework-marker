@@ -8,6 +8,7 @@ Handles:
 - Base64 encoding for Ollama vision API
 """
 import io
+import re
 import base64
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
@@ -88,13 +89,48 @@ class ImageProcessor:
                 prompt="Extract all text, code, labels, and metrics from this image. "
                        "Preserve formatting and structure."
             )
-            return ocr_text.strip()
+            return self._cleanup_ocr_text(ocr_text.strip())
 
         except Exception as e:
             image_id = getattr(image, 'image_id', 'unknown')
             logger.warning(f"OCR failed for {image_id}: {e}")
             return ""
     
+    @staticmethod
+    def _cleanup_ocr_text(text: str) -> str:
+        """Clean up OCR text: fix hyphenation, merge wrapped lines, collapse whitespace."""
+        if not text:
+            return text
+
+        # Join hyphenated line breaks: "inter-\nnational" → "international"
+        text = re.sub(r'(\w)-\n(\w)', r'\1\2', text)
+
+        # Merge wrapped lines within paragraphs:
+        # If a line does NOT start with uppercase, bullet, number, or pipe (table),
+        # join it to the previous line
+        lines = text.split('\n')
+        merged = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                # Preserve paragraph breaks (empty lines)
+                merged.append('')
+            elif merged and merged[-1] and not re.match(r'^[A-Z•\-\*\d|►▸→]', stripped):
+                # Continuation of previous line — merge
+                merged[-1] = merged[-1].rstrip() + ' ' + stripped
+            else:
+                merged.append(stripped)
+
+        text = '\n'.join(merged)
+
+        # Collapse multiple whitespace within lines (but preserve newlines)
+        text = re.sub(r'[^\S\n]+', ' ', text)
+
+        # Collapse 3+ consecutive newlines into 2
+        text = re.sub(r'\n{3,}', '\n\n', text)
+
+        return text.strip()
+
     def process_docx_images(
         self,
         figures: Dict[str, bytes],

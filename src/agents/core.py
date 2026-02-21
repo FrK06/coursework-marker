@@ -7,6 +7,7 @@ Three-agent system for KSB assessment:
 3. Feedback Agent - Personalized feedback generation
 """
 import logging
+from abc import abstractmethod
 from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from dataclasses import dataclass, field
 from enum import Enum
@@ -43,6 +44,7 @@ class AgentContext:
     table_analyses: List[Dict[str, Any]] = field(default_factory=list)
     evidence_map: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     evidence_metadata: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # Stores query_variations, search_strategy, etc.
+    content_quality: Dict[str, Any] = field(default_factory=dict)  # Content relevance assessment
     
     # Scoring results (populated by Scoring Agent)
     ksb_scores: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -127,6 +129,7 @@ class BaseAgent:
         
         return None
     
+    @abstractmethod
     def process(self, context: AgentContext) -> AgentContext:
         """Process the context and return updated context."""
         raise NotImplementedError
@@ -329,8 +332,10 @@ class AgentOrchestrator:
                 "referral_count": referral_count,
                 "overall_recommendation": overall,
                 "key_strengths": self._extract_strengths(feedback_results),
-                "priority_improvements": self._extract_improvements(feedback_results)
+                "priority_improvements": self._extract_improvements(feedback_results),
+                "content_warnings": context.overall_scores.get("content_warnings", [])
             },
+            "content_quality": context.content_quality,
             "overall_feedback": context.overall_feedback
         }
     

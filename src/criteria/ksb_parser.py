@@ -186,6 +186,39 @@ _DSP_RUBRIC = """
 | **B7 – Shares best practice in org/community (AI & DS)** | Reflects on learning and states at least one way to share best practice (documentation, show-and-tell, template). | Concrete dissemination plan: reusable assets (dashboard standards, QA checks), stakeholder enablement, community contribution. | No meaningful reflection or sharing; vague statements only. |
 """
 
+MODULE_RELEVANCE_TERMS = {
+    'DSP': [
+        'data', 'analysis', 'analytics', 'statistics', 'statistical', 'hypothesis',
+        'visualisation', 'visualization', 'dashboard', 'EDA', 'exploratory',
+        'infrastructure', 'ethics', 'GDPR', 'data protection', 'privacy',
+        'artefact', 'dataset', 'Power BI', 'SQL', 'lakehouse', 'pipeline',
+        'KPI', 'metric', 'insight', 'bias', 'testing', 'p-value', 'confidence',
+        'regression', 'correlation', 'distribution', 'sample', 'population'
+    ],
+    'MLCC': [
+        'cloud', 'ML', 'machine learning', 'training', 'model', 'neural network',
+        'GPU', 'CPU', 'TPU', 'deployment', 'inference', 'SageMaker', 'AWS',
+        'benchmark', 'hyperparameter', 'epoch', 'loss', 'accuracy', 'F1',
+        'pipeline', 'container', 'Docker', 'ECR', 'S3', 'IAM', 'VPC',
+        'GDPR', 'encryption', 'KMS', 'CloudWatch', 'experiment', 'artefact',
+        'cost', 'throughput', 'latency', 'scalability', 'monitoring'
+    ],
+    'AIDI': [
+        'AI', 'artificial intelligence', 'data product', 'innovation', 'stakeholder',
+        'business value', 'ethics', 'responsible AI', 'bias', 'fairness',
+        'prototype', 'MVP', 'user research', 'design thinking', 'agile',
+        'data strategy', 'governance', 'impact', 'risk', 'compliance',
+        'literature', 'trend', 'initiative', 'challenge', 'community'
+    ]
+}
+
+# KSBs affected by adversarial reflection tables, per module
+ADVERSARIAL_REFLECTION_KSBS = {
+    'DSP': ['B7'],       # B7 = shares best practice (depends on reflective evidence)
+    'MLCC': ['B5', 'S23'],  # B5 = CPD, S23 = dissemination
+    'AIDI': ['B4', 'B8'],   # B4 = initiative/responsibility, B8 = trends/innovation
+}
+
 AVAILABLE_MODULES = {
     'DSP': {
         'name': 'DSP - Data Science Principles',
