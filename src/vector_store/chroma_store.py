@@ -1,9 +1,11 @@
-"""
+﻿"""
 ChromaDB Vector Store - Storage for document embeddings.
 """
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import logging
+import gc
+import time
 
 try:
     import chromadb
@@ -297,6 +299,44 @@ class ChromaStore:
         self.clear_criteria()
         self.clear_report()
     
+    def close(self):
+        """Release Chroma resources so temp directories can be cleaned up on Windows."""
+        client = getattr(self, "client", None)
+        if client is None:
+            return
+
+        try:
+            self.clear_all()
+        except Exception as e:
+            logger.warning(f"Could not clear Chroma collections during close: {e}")
+
+        self._criteria_collection = None
+        self._report_collection = None
+        self.client = None
+
+        if hasattr(client, "clear_system_cache"):
+            try:
+                client.clear_system_cache()
+            except Exception as e:
+                logger.warning(f"Could not clear Chroma system cache: {e}")
+
+        del client
+        gc.collect()
+        time.sleep(0.25)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about stored data."""
         try:
@@ -312,3 +352,4 @@ class ChromaStore:
             'persist_directory': str(self.persist_directory),
             'collections': [c.name for c in self.client.list_collections()]
         }
+

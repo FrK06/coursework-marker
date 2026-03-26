@@ -1,4 +1,4 @@
-"""
+﻿"""
 Configuration settings for the Coursework Marker Assistant.
 
 UPDATED: Improved parameters for better accuracy
@@ -19,11 +19,11 @@ for dir_path in [CRITERIA_DIR, REPORTS_DIR, INDEX_DIR]:
 
 
 # Ollama settings
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 
 # UPDATED: Default to working 7B baseline model (4B models are BELOW MINIMUM and unreliable)
-# Your models: mistral:7b (✅ RECOMMENDED - working baseline), gpt-oss:20b (⚠️ too strict), qwen3-vl:4b (⚠️ small), gemma3:4b (❌ not recommended)
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral:7b")  # ✅ Recommended 7B baseline
+# Your models: mistral:7b (âœ… RECOMMENDED - working baseline), gpt-oss:20b (âš ï¸ too strict), qwen3-vl:4b (âš ï¸ small), gemma3:4b (âŒ not recommended)
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "ministral-3:8b")  # âœ… Recommended 7B baseline
 
 OLLAMA_TIMEOUT = 180  # Increased for larger models
 
@@ -99,28 +99,28 @@ class ModelConfig:
     # Model profiles with optimized parameters
     # Format: "model_name": {"temperature": float, "max_tokens": int, "strictness_adjustment": str}
     MODEL_PROFILES = {
-        # ═══════════════════════════════════════════════════════════════════════
+        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
         # YOUR MODELS (based on ollama list)
-        # ═══════════════════════════════════════════════════════════════════════
+        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
         "mistral:7b": {
             "temperature": 0.1,
             "max_tokens": 1500,
-            "strictness_adjustment": "balanced",  # ✅ WORKS WELL - Your baseline
+            "strictness_adjustment": "balanced",  # âœ… WORKS WELL - Your baseline
             "notes": "7B params - well-tested, produces fair grades"
         },
 
         "gpt-oss:20b": {
             "temperature": 0.25,  # Higher temp - large model being too strict
             "max_tokens": 2000,   # Can handle longer outputs
-            "strictness_adjustment": "lenient",  # ⚠️ TOO STRICT despite 20B params
+            "strictness_adjustment": "lenient",  # âš ï¸ TOO STRICT despite 20B params
             "notes": "20B params - paradoxically strict, needs lenient calibration"
         },
 
         "qwen3-vl:4b": {
             "temperature": 0.3,   # Higher temp for small model
             "max_tokens": 1500,
-            "strictness_adjustment": "lenient",  # ⚠️ 4B is below 7B minimum
+            "strictness_adjustment": "lenient",  # âš ï¸ 4B is below 7B minimum
             "notes": "4B vision model - below recommended size, may be unreliable"
         },
 
@@ -138,9 +138,9 @@ class ModelConfig:
             "notes": "GLM-OCR specialist for code/charts/diagrams - document understanding"
         },
 
-        # ═══════════════════════════════════════════════════════════════════════
+        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
         # Other common models (for reference)
-        # ═══════════════════════════════════════════════════════════════════════
+        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
         "mistral": {
             "temperature": 0.1,
@@ -180,3 +180,4 @@ class ModelConfig:
 
         # Return default
         return cls.DEFAULT_PROFILE
+

@@ -1,10 +1,11 @@
-"""
+﻿"""
 Ollama Client - Local LLM inference wrapper.
 """
 import json
 import time
 from typing import Optional, Dict, Any, List
 import logging
+from urllib.parse import urlparse, urlunparse
 
 try:
     import requests
@@ -16,10 +17,10 @@ logger = logging.getLogger(__name__)
 
 class OllamaClient:
     """Client for Ollama local LLM inference."""
-    
+
     def __init__(
         self,
-        base_url: str = "http://localhost:11434",
+        base_url: str = "http://127.0.0.1:11434",
         model: str = "gemma3:4b",
         timeout: int = 120,
         max_retries: int = 3,
@@ -27,42 +28,79 @@ class OllamaClient:
     ):
         if requests is None:
             raise ImportError("requests is required. Install with: pip install requests")
-        
+
         self.base_url = base_url.rstrip('/')
         self.model = model
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
-        
+
         self._verify_connection()
-    
+
+    def _connection_candidates(self) -> List[str]:
+        """Return candidate base URLs, including localhost/127.0.0.1 fallbacks."""
+        candidates = [self.base_url]
+        parsed = urlparse(self.base_url)
+
+        if parsed.hostname == "localhost":
+            fallback_host = "127.0.0.1"
+        elif parsed.hostname == "127.0.0.1":
+            fallback_host = "localhost"
+        else:
+            fallback_host = None
+
+        if fallback_host:
+            netloc = fallback_host
+            if parsed.port:
+                netloc = f"{fallback_host}:{parsed.port}"
+            fallback_url = urlunparse(parsed._replace(netloc=netloc)).rstrip('/')
+            if fallback_url not in candidates:
+                candidates.append(fallback_url)
+
+        return candidates
+
     def _verify_connection(self):
         """Verify Ollama is running and model is available."""
-        try:
-            response = requests.get(f"{self.base_url}/api/tags", timeout=10)
-            response.raise_for_status()
-            
-            models = response.json().get('models', [])
-            model_names = [m['name'] for m in models]
-            
-            model_base = self.model.split(':')[0]
-            available = any(model_base in name for name in model_names)
-            
-            if not available:
-                logger.warning(
-                    f"Model '{self.model}' may not be available. "
-                    f"Available models: {model_names}"
-                )
-            else:
-                logger.info(f"Ollama connected. Model: {self.model}")
-                
-        except requests.RequestException as e:
-            logger.error(f"Could not connect to Ollama at {self.base_url}: {e}")
-            raise ConnectionError(
-                f"Ollama is not running or not accessible at {self.base_url}. "
-                "Please start Ollama with: ollama serve"
-            )
-    
+        last_error = None
+
+        for candidate_url in self._connection_candidates():
+            try:
+                response = requests.get(f"{candidate_url}/api/tags", timeout=10)
+                response.raise_for_status()
+
+                if candidate_url != self.base_url:
+                    logger.info(
+                        "Ollama reached via fallback endpoint %s (configured %s)",
+                        candidate_url,
+                        self.base_url,
+                    )
+                    self.base_url = candidate_url
+
+                models = response.json().get('models', [])
+                model_names = [m['name'] for m in models]
+
+                model_base = self.model.split(':')[0]
+                available = any(model_base in name for name in model_names)
+
+                if not available:
+                    logger.warning(
+                        f"Model '{self.model}' may not be available. "
+                        f"Available models: {model_names}"
+                    )
+                else:
+                    logger.info(f"Ollama connected. Model: {self.model}")
+
+                return
+            except requests.RequestException as e:
+                last_error = e
+                logger.error(f"Could not connect to Ollama at {candidate_url}: {e}")
+
+        tried = ", ".join(self._connection_candidates())
+        raise ConnectionError(
+            f"Ollama is not running or not accessible at {tried}. "
+            "Please start Ollama with: ollama serve"
+        )
+
     def generate(
         self,
         prompt: str,
@@ -74,7 +112,7 @@ class OllamaClient:
     ) -> str:
         """
         Generate text from a prompt.
-        
+
         Args:
             prompt: User prompt
             system_prompt: Optional system prompt
@@ -82,7 +120,7 @@ class OllamaClient:
             max_tokens: Maximum tokens to generate
             images: Optional list of base64-encoded images for vision
             stream: Whether to stream the response
-            
+
         Returns:
             Generated text
         """
@@ -95,22 +133,22 @@ class OllamaClient:
                 "num_predict": max_tokens,
             }
         }
-        
+
         if system_prompt:
             payload["system"] = system_prompt
-        
+
         if images:
             payload["images"] = images
-        
+
         last_error = None
-        
+
         for attempt in range(self.max_retries):
             try:
                 if stream:
                     return self._generate_stream(payload)
                 else:
                     return self._generate_sync(payload)
-                    
+
             except requests.RequestException as e:
                 last_error = e
                 logger.warning(
@@ -118,9 +156,9 @@ class OllamaClient:
                 )
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay)
-        
+
         raise RuntimeError(f"Failed after {self.max_retries} attempts: {last_error}")
-    
+
     def _generate_sync(self, payload: Dict[str, Any]) -> str:
         """Synchronous generation."""
         response = requests.post(
@@ -129,10 +167,10 @@ class OllamaClient:
             timeout=self.timeout
         )
         response.raise_for_status()
-        
+
         result = response.json()
         return result.get('response', '')
-    
+
     def _generate_stream(self, payload: Dict[str, Any]) -> str:
         """Streaming generation (returns complete text)."""
         response = requests.post(
@@ -142,9 +180,9 @@ class OllamaClient:
             stream=True
         )
         response.raise_for_status()
-        
+
         full_response = []
-        
+
         for line in response.iter_lines():
             if line:
                 try:
@@ -155,7 +193,7 @@ class OllamaClient:
                         break
                 except json.JSONDecodeError:
                     continue
-        
+
         return ''.join(full_response)
 
     def extract_text_from_image(
@@ -189,8 +227,8 @@ class OllamaClient:
             "images": [image_base64],
             "stream": False,
             "options": {
-                "temperature": 0.1,  # Low temp for accurate extraction
-                "num_predict": 2000,  # Allow longer output for code/charts
+                "temperature": 0.1,
+                "num_predict": 2000,
             }
         }
 
@@ -214,8 +252,13 @@ class OllamaClient:
 
     def is_available(self) -> bool:
         """Check if Ollama and the model are available."""
-        try:
-            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
-            return response.status_code == 200
-        except requests.RequestException:
-            return False
+        for candidate_url in self._connection_candidates():
+            try:
+                response = requests.get(f"{candidate_url}/api/tags", timeout=5)
+                if response.status_code == 200:
+                    if candidate_url != self.base_url:
+                        self.base_url = candidate_url
+                    return True
+            except requests.RequestException:
+                continue
+        return False

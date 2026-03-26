@@ -1,7 +1,7 @@
-"""
-Coursework Marker Assistant - Source Package
+﻿"""
+Coursework Marker Assistant - Source Package.
 
-Now with three-agent agentic assessment system.
+Includes the current LangGraph assessment pipeline and the legacy three-agent system.
 """
 from .document_processing import DocxProcessor, PDFProcessor, ImageProcessor, ProcessedImage
 from .chunking import SmartChunker
@@ -15,7 +15,7 @@ from .criteria import (
     AVAILABLE_MODULES
 )
 
-# NEW: Agentic system
+# Legacy three-agent system (still exported for compatibility)
 from .agents import (
     AgentOrchestrator,
     AnalysisAgent,

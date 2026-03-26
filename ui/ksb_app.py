@@ -1,90 +1,115 @@
-"""
-KSB Coursework Marker - Agentic Version
+﻿"""
+KSB Coursework Marker â€” LangGraph Version
 
-Three-agent architecture:
-1. Analysis Agent - Multimodal document analysis
-2. Scoring Agent - Rubric application and weighted scoring
-3. Feedback Agent - Personalized feedback generation
+Streamlit UI wired to the compiled LangGraph StateGraph.
+Flow: Upload DOCX/PDF -> Ingest -> graph.stream() -> Display results
 """
 import streamlit as st
 import tempfile
 import time
 import logging
-from pathlib import Path
-from typing import Dict, Any, Optional
-import sys
+import shutil
 import json
 import csv
+import base64
+import hashlib
+import html
 from io import StringIO
+from pathlib import Path
+from typing import Dict, Any, Optional
 from datetime import datetime
+from docx import Document
+from docx.oxml.ns import qn
+import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.document_processing import DocxProcessor, PDFProcessor, ImageProcessor, ProcessedImage
+from src.document_processing import DocxProcessor, PDFProcessor, ImageProcessor
 from src.chunking import SmartChunker
 from src.embeddings import Embedder
 from src.vector_store import ChromaStore
 from src.llm import OllamaClient
-from src.criteria import KSBCriterion, get_module_criteria, get_available_modules
-from src.agents import create_agent_system, AgentOrchestrator
+from src.criteria import get_module_criteria, get_available_modules
+from src.brief import get_default_brief, parse_uploaded_brief
 
-
-# Try to import brief module (optional)
-try:
-    from src.brief import get_default_brief
-    HAS_BRIEF = True
-except ImportError:
-    HAS_BRIEF = False
-    def get_default_brief(module): return None
-
-from config import OLLAMA_BASE_URL, OLLAMA_MODEL, EMBEDDING_MODEL
+from config import (
+    OLLAMA_BASE_URL, OLLAMA_MODEL, EMBEDDING_MODEL,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 st.set_page_config(
     page_title="KSB Marker",
-    page_icon="⚖️",
+    page_icon="KSB",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
+
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# CSS
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 st.markdown("""
 <style>
     .main-header { font-size: 2.8rem; font-weight: 700; background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; margin-bottom: 0.5rem; }
     .sub-header { font-size: 1.1rem; color: #8b95a5; margin-bottom: 2rem; text-align: center; }
-    .agent-card { background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); border-radius: 12px; padding: 1rem; border: 1px solid #3d4654; margin: 0.3rem 0; }
-    .agent-card.active { border-color: #667eea; box-shadow: 0 0 15px rgba(102, 126, 234, 0.3); }
-    .agent-card.complete { border-color: #10b981; }
-    .agent-icon { font-size: 1.8rem; }
-    .agent-name { font-size: 1rem; font-weight: 600; color: #e2e8f0; }
-    .agent-status { font-size: 0.8rem; color: #8b95a5; }
-    .tool-tag { background: #2d3748; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; margin: 0.1rem; display: inline-block; color: #a0aec0; }
-    .grade-badge { padding: 0.3rem 0.8rem; border-radius: 20px; font-weight: 600; }
+    .phase-card { background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); border-radius: 12px; padding: 1rem; border: 1px solid #3d4654; margin: 0.3rem 0; }
+    .workspace-card { background: linear-gradient(160deg, #18212f 0%, #202d40 100%); border-radius: 14px; padding: 1rem; border: 1px solid #31435b; margin-bottom: 0.8rem; }
+    .workspace-title { color: #e2e8f0; font-weight: 700; margin-bottom: 0.35rem; }
+    .workspace-copy { color: #9fb0c5; font-size: 0.9rem; line-height: 1.5; }
+    .report-document { padding: 1.35rem 1.45rem; max-height: 960px; overflow-y: auto; }
+    .report-heading { color: #f4f7fb; font-family: Georgia, serif; font-weight: 700; line-height: 1.35; }
+    .report-heading-0 { font-size: 1.75rem; margin: 0 0 1rem 0; }
+    .report-heading-1 { font-size: 1.35rem; margin: 1.2rem 0 0.55rem 0; }
+    .report-heading-2 { font-size: 1.16rem; margin: 1rem 0 0.45rem 0; }
+    .report-heading-3 { font-size: 1.02rem; margin: 0.9rem 0 0.35rem 0; text-transform: none; }
+    .report-paragraph { color: #dfe7f0; font-family: Georgia, serif; font-size: 1rem; line-height: 1.62; margin: 0 0 0.78rem 0; }
+    .report-caption { color: #aebccd; font-family: Georgia, serif; font-size: 0.92rem; font-style: italic; line-height: 1.5; margin: 0.1rem 0 0.85rem 0; }
+    .report-figure { margin: 1rem 0 1.1rem 0; text-align: center; }
+    .report-figure img { max-width: 100%; height: auto; border-radius: 12px; border: 1px solid #31435b; background: #0f1723; }
+    .report-table { margin: 0.9rem 0 1.2rem 0; overflow-x: auto; }
+    .report-table table { width: 100%; border-collapse: collapse; font-size: 0.94rem; }
+    .report-table th { background: #223048; color: #edf2f7; padding: 0.55rem 0.65rem; border: 1px solid #31435b; text-align: left; }
+    .report-table td { color: #d7e0eb; padding: 0.55rem 0.65rem; border: 1px solid #31435b; text-align: left; vertical-align: top; }
+    .phase-card.active { border-color: #667eea; box-shadow: 0 0 15px rgba(102, 126, 234, 0.3); }
+    .phase-card.complete { border-color: #10b981; }
+    .grade-badge { padding: 0.3rem 0.8rem; border-radius: 20px; font-weight: 600; display: inline-block; }
     .grade-merit { background: #3b82f6; color: white; }
     .grade-pass { background: #10b981; color: white; }
     .grade-referral { background: #ef4444; color: white; }
+    .grade-unknown { background: #6b7280; color: white; }
     .stat-card { background: linear-gradient(135deg, #1e2530 0%, #252d3a 100%); border-radius: 10px; padding: 1rem; text-align: center; border: 1px solid #2d3748; }
     .stat-number { font-size: 2rem; font-weight: 700; }
+    .tool-tag { background: #2d3748; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.65rem; margin: 0.1rem; display: inline-block; color: #a0aec0; }
 </style>
 """, unsafe_allow_html=True)
 
 
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Session state
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
 def init_session_state():
     defaults = {
-        'report_data': None,
-        'ksb_criteria': None,
-        'assignment_brief': None,
-        'agent_results': None,
-        'assessment_complete': False,
-        'current_phase': None,
-        'selected_module': 'DSP',
-        'verbose_mode': False,
+        "report_data": None,
+        "ksb_criteria": None,
+        "assignment_brief": None,
+        "assignment_brief_source": "default",
+        "assignment_brief_filename": None,
+        "agent_results": None,
+        "assessment_complete": False,
+        "selected_module": "DSP",
+        "verbose_mode": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
+
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Cached resources
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @st.cache_resource
 def load_ollama_client():
@@ -112,8 +137,12 @@ def load_image_processor():
         return None
 
 
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Document processing
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
 def process_report(uploaded_file, image_processor=None) -> Optional[Dict[str, Any]]:
-    """Process uploaded report with input validation."""
+    """Process uploaded report and return structured data."""
     if uploaded_file is None:
         return None
 
@@ -123,48 +152,52 @@ def process_report(uploaded_file, image_processor=None) -> Optional[Dict[str, An
             tmp.write(uploaded_file.getvalue())
             tmp_path = tmp.name
 
-        processor = DocxProcessor() if suffix == '.docx' else PDFProcessor()
+        processor = DocxProcessor() if suffix == ".docx" else PDFProcessor()
         doc = processor.process(tmp_path)
 
-        # Validate document content length
-        raw_text = getattr(doc, 'raw_text', '')
+        raw_text = getattr(doc, "raw_text", "")
         if len(raw_text.strip()) < 200:
-            st.warning("⚠️ Document appears too short to assess (less than 200 characters). Please check the upload.")
-            logger.warning(f"Document too short: {len(raw_text)} characters")
-            # Clean up temp file
-            try:
-                Path(tmp_path).unlink()
-            except:
-                pass
+            st.warning("Document appears too short to assess (less than 200 characters).")
+            Path(tmp_path).unlink(missing_ok=True)
             return None
 
         chunker = SmartChunker()
         chunks = chunker.chunk_report(doc.chunks, document_id="report")
 
-        # Validate chunk count
         if len(chunks) < 3:
-            st.warning(f"⚠️ Document produced very few text sections ({len(chunks)} chunks). Results may be unreliable.")
-            logger.warning(f"Low chunk count: {len(chunks)}")
+            st.warning(f"Document produced very few text sections ({len(chunks)} chunks). Results may be unreliable.")
 
         images = []
         if image_processor:
-            if suffix == '.docx' and hasattr(doc, 'figures') and doc.figures:
-                images = image_processor.process_docx_images(doc.figures, getattr(doc, 'figure_captions', {}))
-            elif suffix == '.pdf':
+            if suffix == ".docx" and hasattr(doc, "figures") and doc.figures:
+                images = image_processor.process_docx_images(
+                    doc.figures, getattr(doc, "figure_captions", {})
+                )
+            elif suffix == ".pdf":
                 images = image_processor.process_pdf_images(tmp_path)
 
-        # Get page count correctly for both PDF (total_pages) and DOCX (total_pages_estimate)
-        total_pages = getattr(doc, 'total_pages', None) or getattr(doc, 'total_pages_estimate', 1)
+        total_pages = getattr(doc, "total_pages", None) or getattr(doc, "total_pages_estimate", 1)
+
+        render_blocks = []
+        if suffix == ".docx":
+            render_blocks = _build_docx_render_blocks(
+                tmp_path,
+                getattr(doc, "figures", {}),
+                images,
+            )
 
         return {
-            'chunks': [c.to_dict() if hasattr(c, 'to_dict') else c for c in chunks],
-            'title': doc.title or uploaded_file.name,
-            'filename': uploaded_file.name,
-            'total_pages': total_pages,
-            'pages_are_accurate': getattr(doc, 'pages_are_accurate', suffix == '.pdf'),
-            'raw_text': raw_text,
-            'images': images,
-            'tmp_path': tmp_path
+            "chunks": [c.to_dict() if hasattr(c, "to_dict") else c for c in chunks],
+            "title": doc.title or uploaded_file.name,
+            "filename": uploaded_file.name,
+            "file_extension": suffix,
+            "file_bytes": uploaded_file.getvalue(),
+            "total_pages": total_pages,
+            "pages_are_accurate": getattr(doc, "pages_are_accurate", suffix == ".pdf"),
+            "raw_text": raw_text,
+            "images": images,
+            "render_blocks": render_blocks,
+            "tmp_path": tmp_path,
         }
     except Exception as e:
         logger.exception("Error processing report")
@@ -172,719 +205,1130 @@ def process_report(uploaded_file, image_processor=None) -> Optional[Dict[str, An
         return None
 
 
-def display_agent_status(phase: str):
-    """Display agent status cards."""
-    col1, col2, col3 = st.columns(3)
-    
-    analysis_status = 'complete' if phase in ['scoring', 'feedback', 'complete'] else 'active' if phase == 'analysis' else 'waiting'
-    scoring_status = 'complete' if phase in ['feedback', 'complete'] else 'active' if phase == 'scoring' else 'waiting'
-    feedback_status = 'complete' if phase == 'complete' else 'active' if phase == 'feedback' else 'waiting'
-    
-    def status_class(s):
-        return 'active' if s == 'active' else 'complete' if s == 'complete' else ''
-    
-    def status_text(s):
-        return '⚡ Processing...' if s == 'active' else '✓ Complete' if s == 'complete' else '⏳ Waiting'
-    
-    with col1:
-        st.markdown(f"""
-        <div class="agent-card {status_class(analysis_status)}">
-            <span class="agent-icon">🔍</span>
-            <span class="agent-name">Analysis</span>
-            <div class="agent-status">{status_text(analysis_status)}</div>
-            <div><span class="tool-tag">text</span><span class="tool-tag">chart</span><span class="tool-tag">image</span><span class="tool-tag">evidence</span></div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown(f"""
-        <div class="agent-card {status_class(scoring_status)}">
-            <span class="agent-icon">📊</span>
-            <span class="agent-name">Scoring</span>
-            <div class="agent-status">{status_text(scoring_status)}</div>
-            <div><span class="tool-tag">rubric</span><span class="tool-tag">weights</span><span class="tool-tag">grade</span></div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        st.markdown(f"""
-        <div class="agent-card {status_class(feedback_status)}">
-            <span class="agent-icon">💬</span>
-            <span class="agent-name">Feedback</span>
-            <div class="agent-status">{status_text(feedback_status)}</div>
-            <div><span class="tool-tag">strengths</span><span class="tool-tag">gaps</span><span class="tool-tag">format</span></div>
-        </div>
-        """, unsafe_allow_html=True)
+def process_assignment_brief(uploaded_file, module_code: str):
+    """Process an uploaded assignment brief and return a parsed brief object."""
+    if uploaded_file is None:
+        return None
 
-
-def run_agent_pipeline(report_data, ksb_criteria, assignment_brief, llm, embedder, progress_callback, verbose_log=None):
-    """Run the three-agent pipeline with proper resource cleanup."""
-    import shutil
-
-    # Import here to set verbose callback
-    from src.agents.core import BaseAgent
-
-    # Set up verbose callback if log container provided
-    if verbose_log is not None:
-        def verbose_callback(agent, message, data=None):
-            verbose_log.append(f"[{agent.upper()}] {message}")
-        BaseAgent.verbose_callback = verbose_callback
-    else:
-        BaseAgent.verbose_callback = None
-
-    # Create vector store with temp directory (will be cleaned up in finally block)
-    tmpdir = tempfile.mkdtemp()
-    vector_store = None
-    orchestrator = None
-    results = None
+    suffix = Path(uploaded_file.name).suffix.lower()
+    tmp_path = None
 
     try:
-        vector_store = ChromaStore(persist_directory=tmpdir)
+        if suffix == ".txt":
+            raw_text = uploaded_file.getvalue().decode("utf-8", errors="replace")
+        else:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(uploaded_file.getvalue())
+                tmp_path = tmp.name
 
-        progress_callback("Indexing report...", 0.05, "analysis")
-        report_texts = [c.get('content', '') for c in report_data['chunks']]
+            if suffix == ".docx":
+                raw_text = DocxProcessor().process(tmp_path).raw_text
+            elif suffix == ".pdf":
+                raw_text = PDFProcessor().process(tmp_path).raw_text
+            else:
+                st.error("Unsupported assignment brief format.")
+                return None
+
+        if len(raw_text.strip()) < 100:
+            st.warning("Assignment brief appears too short to parse reliably.")
+            return None
+
+        return parse_uploaded_brief(raw_text, module_code)
+    except Exception as e:
+        logger.exception("Error processing assignment brief")
+        st.error(f"Brief error: {str(e)}")
+        return None
+    finally:
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
+
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# LangGraph pipeline
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+def run_langgraph_pipeline(
+    report_data: dict,
+    ksb_criteria: list,
+    assignment_brief,
+    embedder: Embedder,
+    module_code: str,
+    progress_bar,
+    status_text,
+    phase_placeholder,
+    verbose_log: Optional[list] = None,
+) -> Optional[dict]:
+    """
+    Run the LangGraph assessment pipeline with streaming progress updates.
+
+    Returns the final graph state dict.
+    """
+    from src.graph import build_graph
+
+    tmpdir = tempfile.mkdtemp()
+    vector_store = None
+
+    try:
+        # â”€â”€ Step 1: Index report into ChromaDB â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        progress_bar.progress(0.05, "Indexing report into vector store...")
+        status_text.text("Indexing report...")
+        _update_phase_display(phase_placeholder, "retrieval", active=False)
+
+        vector_store = ChromaStore(
+            persist_directory=tmpdir,
+        )
+        report_texts = [c.get("content", "") for c in report_data["chunks"]]
         report_embeddings = embedder.embed_documents(report_texts)
-        vector_store.add_report(report_data['chunks'], report_embeddings)
+        vector_store.add_report(report_data["chunks"], report_embeddings)
 
         if verbose_log is not None:
-            verbose_log.append(f"[INDEX] Indexed {len(report_data['chunks'])} chunks")
+            verbose_log.append(f"[INDEX] Indexed {len(report_data['chunks'])} chunks into ChromaDB")
 
-        # Create agent system
-        orchestrator = create_agent_system(
-            llm=llm,
-            embedder=embedder,
-            vector_store=vector_store,
-            verbose=st.session_state.verbose_mode,
-            module_code=st.session_state.selected_module
-        )
-
-        # Convert KSB criteria
+        # â”€â”€ Step 2: Prepare initial state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         ksb_list = []
         for ksb in ksb_criteria:
-            if hasattr(ksb, 'code'):
+            if hasattr(ksb, "code"):
                 ksb_list.append({
-                    'code': ksb.code,
-                    'title': ksb.title,
-                    'pass_criteria': ksb.pass_criteria,
-                    'merit_criteria': ksb.merit_criteria,
-                    'referral_criteria': ksb.referral_criteria,
-                    'category': ksb.category
+                    "code": ksb.code,
+                    "title": ksb.title,
+                    "full_description": ksb.full_description,
+                    "pass_criteria": ksb.pass_criteria,
+                    "merit_criteria": ksb.merit_criteria,
+                    "referral_criteria": ksb.referral_criteria,
+                    "category": ksb.category,
                 })
             else:
                 ksb_list.append(ksb)
 
-        # Convert brief
-        brief_dict = None
+        brief_dict = {}
         if assignment_brief:
-            brief_dict = assignment_brief.to_dict() if hasattr(assignment_brief, 'to_dict') else assignment_brief
+            brief_dict = assignment_brief.to_dict() if hasattr(assignment_brief, "to_dict") else assignment_brief
 
-        # Convert images
         images = []
-        for img in report_data.get('images', []):
-            if hasattr(img, 'image_id'):
+        for img in report_data.get("images", []):
+            if hasattr(img, "image_id"):
                 images.append({
-                    'image_id': img.image_id,
-                    'caption': getattr(img, 'caption', ''),
-                    'base64': getattr(img, 'base64_data', '')
+                    "image_id": img.image_id,
+                    "caption": getattr(img, "caption", ""),
+                    "base64": getattr(img, "base64_data", ""),
                 })
             elif isinstance(img, dict):
                 images.append(img)
 
-        # Run pipeline with progress callbacks
-        def agent_progress(msg, pct):
-            if "Analysis" in msg:
-                progress_callback(msg, pct, "analysis")
-            elif "Scoring" in msg:
-                progress_callback(msg, pct, "scoring")
-            elif "Feedback" in msg:
-                progress_callback(msg, pct, "feedback")
-            else:
-                progress_callback(msg, pct, "complete")
+        initial_state = {
+            "module_code": module_code,
+            "report_chunks": report_data["chunks"],
+            "report_images": images,
+            "ksb_criteria": ksb_list,
+            "assignment_brief": brief_dict,
+            "pages_are_accurate": report_data.get("pages_are_accurate", False),
+            "evidence_map": {},
+            "content_quality": {},
+            "image_analyses": [],
+            "ksb_scores": {},
+            "overall_recommendation": "",
+            "content_warnings": [],
+            "ksb_feedback": {},
+            "overall_feedback": "",
+            "current_ksb_index": 0,
+            "errors": [],
+            "phase": "retrieval",
+        }
 
-        results = orchestrator.process(
-            chunks=report_data['chunks'],
-            ksb_criteria=ksb_list,
-            assignment_brief=brief_dict,
-            images=images,
-            progress_callback=agent_progress
-        )
+        # â”€â”€ Step 3: Build and stream graph â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # Monkey-patch config so retriever_node can find the temp store
+        import config
+        original_persist = config.CHROMA_PERSIST_DIR
+        config.CHROMA_PERSIST_DIR = tmpdir
 
-        return results
+        try:
+            graph = build_graph()
+
+            # Phase progress mapping
+            phase_progress = {
+                "retriever": (0.30, "Retrieving evidence..."),
+                "DSP": (0.75, "Scoring KSBs (DSP)..."),
+                "MLCC": (0.75, "Scoring KSBs (MLCC)..."),
+                "AIDI": (0.75, "Scoring KSBs (AIDI)..."),
+                "feedback": (0.95, "Generating feedback..."),
+            }
+
+            # Accumulate node outputs into a single state dict
+            accumulated_state = dict(initial_state)
+
+            for chunk in graph.stream(initial_state):
+                for node_name, node_output in chunk.items():
+                    # Merge node output into accumulated state
+                    accumulated_state.update(node_output)
+
+                    if node_name in phase_progress:
+                        end_pct, label = phase_progress[node_name]
+                        progress_bar.progress(end_pct, label)
+                        status_text.text(label)
+
+                        # Determine phase for display
+                        if node_name == "retriever":
+                            _update_phase_display(phase_placeholder, "retrieval")
+                        elif node_name in ("DSP", "MLCC", "AIDI"):
+                            _update_phase_display(phase_placeholder, "scoring")
+                        elif node_name == "feedback":
+                            _update_phase_display(phase_placeholder, "feedback")
+
+                        if verbose_log is not None:
+                            verbose_log.append(f"[GRAPH] Node '{node_name}' completed")
+                            if node_name == "retriever":
+                                em = node_output.get("evidence_map", {})
+                                total_chunks = sum(
+                                    e.get("total_retrieved", 0)
+                                    for e in em.values()
+                                )
+                                verbose_log.append(
+                                    f"[RETRIEVER] {len(em)} KSBs, {total_chunks} total evidence chunks"
+                                )
+                            elif node_name in ("DSP", "MLCC", "AIDI"):
+                                scores = node_output.get("ksb_scores", {})
+                                for code, s in scores.items():
+                                    verbose_log.append(
+                                        f"[SCORE] {code}: {s.get('grade', '?')} "
+                                        f"(confidence={s.get('confidence', '?')}, "
+                                        f"method={s.get('extraction_method', '?')})"
+                                    )
+
+            progress_bar.progress(1.0, "Assessment complete!")
+            status_text.text("Assessment complete!")
+            _update_phase_display(phase_placeholder, "complete")
+
+            return accumulated_state
+
+        finally:
+            config.CHROMA_PERSIST_DIR = original_persist
 
     finally:
-        # Clean up temporary ChromaDB directory
-        if tmpdir and Path(tmpdir).exists():
-            try:
-                # Release ChromaDB file locks (Windows file locking issue)
-                try:
-                    del vector_store
-                    import gc
-                    gc.collect()
-                    import time
-                    time.sleep(0.5)  # Give Windows time to release file handles
-                except:
-                    pass
+        # Clean up
+        if vector_store is not None:
+            vector_store.close()
+            del vector_store
+        import gc
+        gc.collect()
+        time.sleep(0.3)
+        try:
+            shutil.rmtree(tmpdir)
+        except Exception as e:
+            logger.warning(f"Failed to clean up temp directory: {e}")
 
-                shutil.rmtree(tmpdir)
-                if verbose_log is not None:
-                    verbose_log.append(f"[CLEANUP] Removed temp directory: {tmpdir}")
-            except Exception as e:
-                logger.warning(f"Failed to clean up temp directory {tmpdir}: {e}")
-
-        # Clean up uploaded file temp path
-        if report_data and 'tmp_path' in report_data:
-            tmp_path = report_data['tmp_path']
-            if tmp_path and Path(tmp_path).exists():
-                try:
-                    Path(tmp_path).unlink()
-                    if verbose_log is not None:
-                        verbose_log.append(f"[CLEANUP] Removed temp file: {tmp_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to clean up temp file {tmp_path}: {e}")
+        if report_data and "tmp_path" in report_data:
+            Path(report_data["tmp_path"]).unlink(missing_ok=True)
 
 
-def export_results_to_csv(results: Dict[str, Any], module_code: str = "MLCC") -> str:
-    """
-    Convert assessment results to CSV format.
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Phase display
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-    Args:
-        results: Assessment results from agent pipeline
-        module_code: Module code for filename
+def _update_phase_display(placeholder, current_phase: str, active: bool = True):
+    """Render the three phase cards with current state."""
+    if placeholder is None:
+        return
 
-    Returns:
-        CSV string ready for download
-    """
-    output = StringIO()
-    writer = csv.writer(output)
+    phases = [
+        ("retrieval", "Retrieval", "Hybrid BM25+semantic evidence search"),
+        ("scoring", "Scoring", "KSB evaluation via local LLM"),
+        ("feedback", "Feedback", "Structured feedback generation"),
+    ]
 
-    # Header row
-    writer.writerow([
-        "KSB Code",
-        "KSB Title",
-        "Grade",
-        "Confidence",
-        "Weighted Score",
-        "Pass Criteria Met",
-        "Merit Criteria Met",
-        "Rationale",
-        "Key Strengths",
-        "Gaps Identified",
-        "Improvement Suggestions"
-    ])
-
-    # Get scoring and feedback results
-    scoring_results = results.get("scoring_results", [])
-    feedback_results = results.get("feedback_results", [])
-
-    # Write data rows
-    for sr in scoring_results:
-        ksb_code = sr.get("ksb_code", "")
-
-        # Find corresponding feedback
-        fb = next((f for f in feedback_results if f.get("ksb_code") == ksb_code), {})
-
-        # Extract strengths (from feedback)
-        strengths = fb.get("strengths", [])
-        strengths_text = " | ".join(str(s) for s in strengths[:3]) if strengths else ""
-
-        # Extract gaps
-        gaps = sr.get("gaps_identified", [])
-        gaps_text = " | ".join(str(g) for g in gaps[:5]) if gaps else ""
-
-        # Extract improvements (from feedback)
-        improvements = fb.get("improvements", [])
-        if improvements:
-            # Handle both dict and string formats
-            imp_texts = []
-            for imp in improvements[:3]:
-                if isinstance(imp, dict):
-                    imp_texts.append(imp.get("suggestion", str(imp)))
-                else:
-                    imp_texts.append(str(imp))
-            improvements_text = " | ".join(imp_texts)
+    cols = placeholder.columns(3)
+    for i, (phase_key, label, desc) in enumerate(phases):
+        if current_phase == "complete":
+            css_class = "complete"
+            icon = "Done"
+        elif phase_key == current_phase and active:
+            css_class = "active"
+            icon = "Running..."
+        elif phases.index((phase_key, label, desc)) < [p[0] for p in phases].index(current_phase) if current_phase in [p[0] for p in phases] else False:
+            css_class = "complete"
+            icon = "Done"
         else:
-            improvements_text = ""
+            css_class = ""
+            icon = "Waiting"
 
-        writer.writerow([
-            ksb_code,
-            sr.get("ksb_title", ""),
-            sr.get("grade", ""),
-            sr.get("confidence", ""),
-            sr.get("weighted_score", 0),
-            sr.get("pass_met", ""),
-            sr.get("merit_met", ""),
-            sr.get("rationale", ""),
-            strengths_text,
-            gaps_text,
-            improvements_text
-        ])
-
-    # Add summary row
-    writer.writerow([])  # Empty row
-    summary = results.get("overall_summary", {})
-    writer.writerow(["OVERALL SUMMARY"])
-    writer.writerow(["Total KSBs", summary.get("total_ksbs", 0)])
-    writer.writerow(["Merit Count", summary.get("merit_count", 0)])
-    writer.writerow(["Pass Count", summary.get("pass_count", 0)])
-    writer.writerow(["Referral Count", summary.get("referral_count", 0)])
-    writer.writerow(["Overall Recommendation", summary.get("overall_recommendation", "")])
-    writer.writerow(["Confidence", summary.get("confidence", "")])
-
-    # Add key strengths
-    writer.writerow([])
-    writer.writerow(["KEY STRENGTHS"])
-    for strength in summary.get("key_strengths", [])[:5]:
-        writer.writerow(["", strength])
-
-    # Add priority improvements
-    writer.writerow([])
-    writer.writerow(["PRIORITY IMPROVEMENTS"])
-    for improvement in summary.get("priority_improvements", [])[:5]:
-        writer.writerow(["", improvement])
-
-    return output.getvalue()
+        with cols[i]:
+            st.markdown(f"""
+            <div class="phase-card {css_class}">
+                <div style="font-weight: 600; color: #e2e8f0;">{label}</div>
+                <div style="font-size: 0.8rem; color: #8b95a5;">{desc}</div>
+                <div style="font-size: 0.75rem; color: #667eea; margin-top: 0.3rem;">{icon}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
 
-def display_results(results: Dict[str, Any]):
-    """Display assessment results."""
-    
-    summary = results.get("overall_summary", {})
-    
-    st.markdown("## 📊 Assessment Results")
+def _build_docx_render_blocks(docx_path: str, figures: Dict[str, bytes], processed_images: list) -> list:
+    """Build ordered render blocks for DOCX viewing with inline images."""
+    try:
+        document = Document(docx_path)
+    except Exception:
+        logger.warning("Could not build DOCX render blocks", exc_info=True)
+        return []
 
-    # Content quality warnings
-    content_quality = results.get("content_quality", {})
-    off_topic_images = content_quality.get("off_topic_images", 0)
-    adversarial_tables = content_quality.get("adversarial_tables_detected", 0)
+    paragraph_lookup = {para._element: para for para in document.paragraphs}
+    table_lookup = {table._tbl: table for table in document.tables}
+    figure_id_by_hash = {
+        hashlib.sha1(raw_bytes).hexdigest(): figure_id
+        for figure_id, raw_bytes in (figures or {}).items()
+    }
+    processed_images_by_id = {
+        image.image_id: image
+        for image in (processed_images or [])
+        if getattr(image, "image_id", None)
+    }
+    processor = DocxProcessor()
+    blocks = []
 
-    if adversarial_tables > 0:
-        image_note = ""
-        if off_topic_images > 0:
-            image_note = (
-                f" Additionally, **{off_topic_images}** unrelated image(s) were detected."
+    for element in document.element.body:
+        if element.tag.endswith('p'):
+            para = paragraph_lookup.get(element)
+            if para is None:
+                continue
+
+            style_name = para.style.name if para.style else ""
+            heading_level = processor._detect_heading_level(style_name, para)
+            text = para.text.strip()
+
+            if text:
+                block_type = "heading" if heading_level is not None else "paragraph"
+                if block_type == "paragraph" and "caption" in style_name.lower():
+                    block_type = "caption"
+
+                blocks.append({
+                    "type": block_type,
+                    "text": text,
+                    "level": heading_level if heading_level is not None else 1,
+                })
+
+            for node in para._element.iter():
+                if not str(node.tag).endswith('}blip'):
+                    continue
+
+                rel_id = node.get(qn('r:embed'))
+                if not rel_id or rel_id not in document.part.rels:
+                    continue
+
+                try:
+                    raw_bytes = document.part.rels[rel_id].target_part.blob
+                except Exception:
+                    continue
+
+                figure_id = figure_id_by_hash.get(hashlib.sha1(raw_bytes).hexdigest())
+                processed_image = processed_images_by_id.get(figure_id)
+                if not processed_image or not getattr(processed_image, "base64_data", None):
+                    continue
+
+                blocks.append({
+                    "type": "image",
+                    "base64_data": processed_image.base64_data,
+                    "format": processed_image.format or "png",
+                    "image_id": processed_image.image_id,
+                })
+
+        elif element.tag.endswith('tbl'):
+            table = table_lookup.get(element)
+            if table is None or not table.rows:
+                continue
+
+            rows = []
+            for row in table.rows:
+                rows.append([cell.text.strip() for cell in row.cells])
+
+            if rows:
+                blocks.append({
+                    "type": "table",
+                    "rows": rows,
+                })
+
+    return blocks
+
+
+def _render_report_text_preview(report_data: dict):
+    """Render a readable text preview for DOCX/PDF reports."""
+    raw_text = (report_data or {}).get("raw_text", "").strip()
+    if not raw_text:
+        st.info("No readable text preview is available for this report.")
+        return
+
+    text_preview = raw_text if len(raw_text) <= 120000 else raw_text[:120000] + "\n\n[Preview truncated for display]"
+    st.markdown(
+        f"""
+        <div class="workspace-card" style="max-height: 920px; overflow-y: auto; white-space: pre-wrap; font-family: Georgia, serif; line-height: 1.45;">
+            <div class="workspace-title">Reading View</div>
+            <div class="workspace-copy" style="color: #d7e0eb;">{html.escape(text_preview)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _build_docx_report_html(report_data: dict) -> Optional[str]:
+    """Build an HTML view for DOCX reports with inline images and controlled spacing."""
+    blocks = (report_data or {}).get("render_blocks", []) or []
+    if not blocks:
+        return None
+
+    parts = ['<div class="workspace-card report-document">']
+
+    for block in blocks:
+        block_type = block.get("type")
+
+        if block_type in {"heading", "paragraph", "caption"}:
+            text_html = html.escape(block.get("text", "")).replace("\n", "<br>")
+            if not text_html:
+                continue
+
+            if block_type == "heading":
+                level = max(0, min(int(block.get("level", 1)), 3))
+                parts.append(f'<div class="report-heading report-heading-{level}">{text_html}</div>')
+            elif block_type == "caption":
+                parts.append(f'<p class="report-caption">{text_html}</p>')
+            else:
+                parts.append(f'<p class="report-paragraph">{text_html}</p>')
+
+        elif block_type == "image":
+            base64_data = block.get("base64_data")
+            if not base64_data:
+                continue
+            img_format = html.escape(block.get("format", "png"))
+            image_id = html.escape(block.get("image_id", "report image"))
+            parts.append(
+                f'<figure class="report-figure"><img src="data:image/{img_format};base64,{base64_data}" alt="{image_id}"></figure>'
             )
-        st.error(
-            "**⚠️ Adversarial Content Detected**\n\n"
-            "The KSB reflection table contains content unrelated to the module "
-            f"(e.g. off-topic text instead of genuine reflections). "
-            f"**{adversarial_tables}** adversarial table(s) found. "
-            f"Affected KSBs have been automatically referred.{image_note}"
-        )
-    elif off_topic_images > 0:
-        st.error(
-            "**⚠️ Adversarial Content Detected**\n\n"
-            f"**{off_topic_images}** image(s) in the report contain content "
-            "unrelated to the module (e.g. off-topic diagrams or screenshots). "
-            "These images have been excluded from evidence."
-        )
-    elif content_quality.get("quality_flag") == "CRITICAL":
-        st.warning(
-            "**⚠️ Content Quality Issue**\n\n"
-            f"Report contains **{content_quality.get('off_topic_chunks', 0)}** off-topic section(s). "
-            "Manual review recommended."
-        )
-    elif content_quality.get("quality_flag") == "WARNING":
-        st.info(
-            "Some sections contain content with low relevance to the module."
-        )
 
-    # Grade cards
+        elif block_type == "table":
+            rows = block.get("rows", [])
+            if not rows:
+                continue
+
+            header_cells = ''.join(f'<th>{html.escape(str(cell))}</th>' for cell in rows[0])
+            body_rows = []
+            for row in rows[1:]:
+                body_cells = ''.join(f'<td>{html.escape(str(cell))}</td>' for cell in row)
+                body_rows.append(f'<tr>{body_cells}</tr>')
+
+            parts.append(
+                '<div class="report-table"><table>'
+                f'<thead><tr>{header_cells}</tr></thead>'
+                f'<tbody>{"".join(body_rows)}</tbody>'
+                '</table></div>'
+            )
+
+    parts.append('</div>')
+    return ''.join(parts)
+
+
+def _render_docx_report_view(report_data: dict):
+    """Render a DOCX report view that keeps paragraph flow and images inline."""
+    report_html = _build_docx_report_html(report_data)
+    if not report_html:
+        _render_report_text_preview(report_data)
+        return
+
+    st.markdown(report_html, unsafe_allow_html=True)
+
+
+def display_report_viewer(module_code: str, module_name: str, llm, embedder, report_data, assignment_brief, results: Optional[dict] = None):
+    """Render a full-width live report viewer so users can read the submission while assessment runs."""
+    st.markdown("## Report Viewer")
+
+    if hasattr(assignment_brief, "tasks"):
+        brief_tasks = len(assignment_brief.tasks)
+    elif isinstance(assignment_brief, dict):
+        brief_tasks = len(assignment_brief.get("tasks", []))
+    else:
+        brief_tasks = 0
+
+    report_ready = bool(report_data)
+    llm_ready = llm is not None
+    enough_chunks = len(report_data.get("chunks", [])) >= 3 if report_data else False
+
+    status_bits = [f"Module: {module_code}", f"Brief tasks: {brief_tasks}"]
+    if report_ready:
+        status_bits.append(f"Pages: {report_data.get('total_pages', 0)}")
+        status_bits.append(f"Chunks: {len(report_data.get('chunks', []))}")
+    st.caption(" | ".join(status_bits))
+
+    if not llm_ready:
+        st.warning("Ollama is offline. You can still read the report here while the assessment setup is being resolved.")
+    elif report_ready and not enough_chunks:
+        st.warning("This report loaded, but it produced very few chunks, so the assessment may be unreliable.")
+    elif report_ready and results and results.get("ksb_scores"):
+        st.success(f"Latest overall recommendation: {results.get('overall_recommendation', 'UNKNOWN')}")
+    elif report_ready:
+        st.info("The report is ready to read. Start the assessment when you are ready.")
+    else:
+        st.info("Upload a report to open a live reading view here.")
+        return
+
+    extension = report_data.get("file_extension", "").lower()
+    file_bytes = report_data.get("file_bytes", b"")
+
+    if extension == ".pdf" and file_bytes:
+        pdf_tab, text_tab = st.tabs(["PDF", "Reading View"])
+
+        with pdf_tab:
+            pdf_base64 = base64.b64encode(file_bytes).decode("utf-8")
+            st.markdown(
+                f"""
+                <div class="workspace-card" style="padding: 0.4rem;">
+                    <iframe src="data:application/pdf;base64,{pdf_base64}" width="100%" height="920" style="border: none; border-radius: 10px;"></iframe>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with text_tab:
+            _render_report_text_preview(report_data)
+    elif extension == ".docx":
+        doc_tab, text_tab = st.tabs(["Document View", "Reading View"])
+        with doc_tab:
+            st.caption("DOCX files are shown in a document view with inline extracted images.")
+            _render_docx_report_view(report_data)
+        with text_tab:
+            _render_report_text_preview(report_data)
+    else:
+        _render_report_text_preview(report_data)
+
+
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Content quality banners
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+def display_content_quality_banners(content_quality: dict, content_warnings: list):
+    """Display content quality banners based on detection results."""
+    if not content_quality:
+        return
+
+    status = content_quality.get("status", "OK")
+    adversarial_ksbs = content_quality.get("adversarial_ksbs", [])
+    off_topic_count = content_quality.get("off_topic_count", 0)
+
+    if adversarial_ksbs and off_topic_count > 0:
+        st.error(
+            f"**Adversarial Content Detected**\n\n"
+            f"**{len(adversarial_ksbs)}** adversarial reflection table(s) found "
+            f"affecting KSBs: {', '.join(adversarial_ksbs)}. "
+            f"Additionally, **{off_topic_count}** off-topic section(s) detected. "
+            f"Affected KSBs have been automatically referred."
+        )
+    elif adversarial_ksbs:
+        st.error(
+            f"**Adversarial Content Detected**\n\n"
+            f"**{len(adversarial_ksbs)}** adversarial reflection table(s) found "
+            f"affecting KSBs: {', '.join(adversarial_ksbs)}. "
+            f"These KSBs have been automatically referred."
+        )
+    elif off_topic_count > 0:
+        st.warning(
+            f"**Content Quality Warning**\n\n"
+            f"**{off_topic_count}** section(s) contain content with very low relevance. "
+            f"Manual review recommended."
+        )
+    elif status == "CRITICAL":
+        st.warning("Content quality issues detected. Review results carefully.")
+    elif status == "WARNING":
+        st.info("Some sections contain content with low relevance to the module.")
+
+    # Show specific content warnings from specialist
+    for warning in content_warnings:
+        st.warning(warning)
+
+
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Results display
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+def display_results(results: dict):
+    """Display assessment results from LangGraph state."""
+
+    ksb_scores = results.get("ksb_scores", {})
+    ksb_feedback = results.get("ksb_feedback", {})
+    overall_recommendation = results.get("overall_recommendation", "UNKNOWN")
+    content_quality = results.get("content_quality", {})
+    content_warnings = results.get("content_warnings", [])
+    ksb_criteria = results.get("ksb_criteria", [])
+    errors = results.get("errors", [])
+
+    st.markdown("## Assessment Results")
+
+    # Content quality banners
+    display_content_quality_banners(content_quality, content_warnings)
+
+    # Errors
+    if errors:
+        with st.expander(f"Errors ({len(errors)})", expanded=False):
+            for err in errors:
+                st.error(err)
+
+    # Grade distribution
+    grades = [s["grade"] for s in ksb_scores.values()]
+    merit_count = grades.count("MERIT")
+    pass_count = grades.count("PASS")
+    referral_count = grades.count("REFERRAL")
+    total = len(grades)
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#fff">{summary.get("total_ksbs", 0)}</div><div>Total KSBs</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#fff">{total}</div><div>Total KSBs</div></div>', unsafe_allow_html=True)
     with col2:
-        st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#10b981">{summary.get("merit_count", 0)}</div><div>Merit</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#3b82f6">{merit_count}</div><div>Merit</div></div>', unsafe_allow_html=True)
     with col3:
-        st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#3b82f6">{summary.get("pass_count", 0)}</div><div>Pass</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#10b981">{pass_count}</div><div>Pass</div></div>', unsafe_allow_html=True)
     with col4:
-        st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#ef4444">{summary.get("referral_count", 0)}</div><div>Referral</div></div>', unsafe_allow_html=True)
-    
-    # Overall recommendation
-    overall = summary.get("overall_recommendation", "UNKNOWN")
-    grade_class = f"grade-{overall.lower()}"
+        st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#ef4444">{referral_count}</div><div>Referral</div></div>', unsafe_allow_html=True)
+
+    # Overall recommendation badge
+    grade_class = f"grade-{overall_recommendation.lower()}" if overall_recommendation in ("MERIT", "PASS", "REFERRAL") else "grade-unknown"
     st.markdown(f"""
     <div style="text-align: center; margin: 1rem 0;">
-        <span class="grade-badge {grade_class}">{overall}</span>
+        <span class="grade-badge {grade_class}">{overall_recommendation}</span>
         <span style="color: #8b95a5; margin-left: 0.5rem;">Overall Recommendation</span>
     </div>
     """, unsafe_allow_html=True)
 
-    # Download Buttons
+    # Export buttons
     st.markdown("---")
-    st.markdown("### 💾 Export Results")
+    st.markdown("### Export Results")
 
-    col1, col2, col3 = st.columns([1, 1, 1])
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    module = results.get("module_code", "UNKNOWN")
+
+    col1, col2, col3 = st.columns(3)
 
     with col1:
-        # Generate CSV
-        csv_data = export_results_to_csv(results, st.session_state.get("selected_module", "MLCC"))
-
-        # Create filename with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        module = st.session_state.get("selected_module", "MLCC")
-        csv_filename = f"ksb_assessment_{module}_{timestamp}.csv"
-
-        # CSV Download button
+        csv_data = _export_csv(ksb_scores, ksb_feedback, overall_recommendation, module)
         st.download_button(
-            label="📊 Download CSV",
+            label="Download CSV",
             data=csv_data,
-            file_name=csv_filename,
+            file_name=f"ksb_assessment_{module}_{timestamp}.csv",
             mime="text/csv",
-            help="Spreadsheet format with grades, feedback, and improvements",
-            use_container_width=True
+            use_container_width=True,
         )
 
     with col2:
-        # Generate JSON
-        json_data = json.dumps(results, indent=2, default=str)
-        json_filename = f"ksb_assessment_{module}_{timestamp}.json"
-
-        # JSON Download button
+        json_data = json.dumps({
+            "module_code": module,
+            "overall_recommendation": overall_recommendation,
+            "ksb_scores": {k: dict(v) for k, v in ksb_scores.items()},
+            "ksb_feedback": {k: dict(v) for k, v in ksb_feedback.items()},
+            "content_quality": content_quality,
+            "errors": errors,
+        }, indent=2, default=str)
         st.download_button(
-            label="📄 Download JSON",
+            label="Download JSON",
             data=json_data,
-            file_name=json_filename,
+            file_name=f"ksb_assessment_{module}_{timestamp}.json",
             mime="application/json",
-            help="Complete raw data in JSON format for further processing",
-            use_container_width=True
+            use_container_width=True,
         )
 
     with col3:
-        # Generate Markdown feedback
-        md = f"# Assessment Report\n\n{results.get('overall_feedback', '')}\n\n"
-        for fb in results.get("feedback_results", []):
-            md += fb.get("formatted_feedback", "") + "\n\n"
-
+        md_parts = [results.get("overall_feedback", "")]
+        for code in sorted(ksb_feedback.keys()):
+            fb = ksb_feedback[code]
+            md_parts.append(fb.get("formatted_markdown", ""))
+        md_data = "\n\n---\n\n".join(md_parts)
         st.download_button(
-            label="📄 Download Markdown",
-            data=md,
+            label="Download Markdown",
+            data=md_data,
             file_name=f"feedback_{module}_{timestamp}.md",
             mime="text/markdown",
-            help="Formatted feedback report in Markdown",
-            use_container_width=True
+            use_container_width=True,
         )
 
     st.markdown("---")
 
-    # Overall feedback (includes key strengths, priority improvements, and next steps)
+    # Overall feedback (strip the grade table header to avoid duplication with stat cards above)
     if results.get("overall_feedback"):
-        with st.expander("📝 Overall Assessment Summary", expanded=True):
-            st.markdown(results["overall_feedback"])
+        with st.expander("Overall Assessment Summary", expanded=True):
+            overall_text = results["overall_feedback"]
+            # Remove the auto-generated grade table header (everything before the LLM response)
+            separator = "---\n\n"
+            if separator in overall_text:
+                # The header ends at the last "---" separator before the LLM content
+                parts = overall_text.split(separator)
+                # The LLM-generated content is after the last separator
+                llm_content = parts[-1].strip() if len(parts) > 1 else overall_text
+                st.markdown(llm_content)
+            else:
+                st.markdown(overall_text)
 
-    # KSB Details
-    st.markdown("## 📋 KSB Breakdown")
+    # Per-KSB breakdown
+    st.markdown("## KSB Breakdown")
 
-    for sr in results.get("scoring_results", []):
-        ksb_code = sr.get("ksb_code", "")
-        grade = sr.get("grade", "UNKNOWN")
-        confidence = sr.get("confidence", "")
-        ksb_title = sr.get("ksb_title", "")
+    # Build criteria lookup for display
+    criteria_lookup = {c["code"]: c for c in ksb_criteria} if ksb_criteria else {}
 
-        icon = "🟢" if grade == "MERIT" else "🟡" if grade == "PASS" else "🔴"
+    # Use criteria order (matches pipeline processing order), fall back to sorted
+    ksb_display_order = [c["code"] for c in ksb_criteria if c["code"] in ksb_scores] if ksb_criteria else sorted(ksb_scores.keys())
 
-        #with st.expander(f"{icon} **{ksb_code}** - {sr.get('ksb_title', '')[:150]}... [{grade}]"):
-        with st.expander(f"{icon} **{ksb_code}** - {ksb_title} [{grade}]"):
-            st.markdown(f"**Confidence:** {confidence} | **Weighted Score:** {sr.get('weighted_score', 0):.3f}")
-            st.markdown(f"**Rationale:** {sr.get('rationale', '')}")
+    for ksb_code in ksb_display_order:
+        score = ksb_scores[ksb_code]
+        grade = score["grade"]
+        confidence = score.get("confidence", "")
+        criterion = criteria_lookup.get(ksb_code, {})
+        ksb_title = criterion.get("title", score.get("ksb_code", ksb_code))
 
-            # Show feedback
-            fb = next((f for f in results.get("feedback_results", []) if f.get("ksb_code") == ksb_code), {})
-            if fb.get("formatted_feedback"):
-                st.markdown(fb["formatted_feedback"])
+        with st.expander(f"**{ksb_code}** - {ksb_title} [{grade}]"):
+            # Feedback
+            fb = ksb_feedback.get(ksb_code, {})
+            if fb.get("formatted_markdown"):
+                st.markdown(fb["formatted_markdown"])
 
-            # Gaps
-            gaps = sr.get("gaps_identified", [])
-            if gaps:
-                st.markdown("**Gaps:**")
-                for g in gaps[:5]:
-                    st.markdown(f"- {g}")
+            # Transparency tabs
+            tab1, tab2, tab3, tab4 = st.tabs([
+                "Evidence", "LLM Reasoning", "Validation", "Grade Decision"
+            ])
 
-            # === TRANSPARENCY PANEL: Assessment Details ===
-            audit = sr.get('audit_trail', {})
-            if audit:  # Only show if audit trail exists
-                with st.expander(f"🔍 Assessment Details for {ksb_code}"):
-                    tab1, tab2, tab3, tab4 = st.tabs(["📄 Evidence Retrieved", "🤖 LLM Reasoning", "✅ Validation", "📊 Grade Decision"])
+            with tab1:
+                evidence_map = results.get("evidence_map", {})
+                evidence = evidence_map.get(ksb_code, {})
+                chunks = evidence.get("chunks", [])
+                st.caption(
+                    f"**Retrieved:** {evidence.get('total_retrieved', 0)} chunks | "
+                    f"**Strategy:** {evidence.get('search_strategy', 'N/A')} | "
+                    f"**Query variations:** {len(evidence.get('query_variations', []))}"
+                )
+                if chunks:
+                    for idx, chunk in enumerate(chunks[:5], 1):
+                        metadata = chunk.get("metadata", {})
+                        section = metadata.get("section_number", "") or metadata.get("section_title", "")
+                        sim = chunk.get("similarity", 0)
+                        st.caption(f"**Chunk {idx}** | Section: `{section or 'N/A'}` | Relevance: `{sim:.3f}`")
+                        content = chunk.get("content", "")
+                        display = content[:500] + "..." if len(content) > 500 else content
+                        st.markdown(
+                            f"<div style='background-color: rgba(255,255,255,0.05); "
+                            f"padding: 10px; border-radius: 5px; border-left: 3px solid #4CAF50; "
+                            f"margin-bottom: 0.5rem; font-family: monospace; font-size: 0.85em;'>"
+                            f"{display}</div>",
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    st.info("No evidence chunks retrieved for this KSB.")
 
-                    # Tab 1: Evidence Retrieved
-                    with tab1:
-                        evidence_info = audit.get('evidence', {})
-                        total_chunks = evidence_info.get('total_chunks_retrieved', 0)
-                        filtered_chunks = evidence_info.get('chunks_after_filtering', 0)
-                        search_strat = evidence_info.get('search_strategy', {})
+            with tab2:
+                raw_response = score.get("raw_llm_response", "")
+                if raw_response:
+                    st.code(raw_response, language="text")
+                else:
+                    st.info("No LLM response (auto-graded).")
 
-                        col1, col2, col3 = st.columns(3)
-                        col1.metric("Total Retrieved", total_chunks)
-                        col2.metric("After Filtering", filtered_chunks)
-                        col3.metric("Boilerplate Filtered", search_strat.get('boilerplate_filtered', 0))
+            with tab3:
+                audit = score.get("audit_trail", {})
+                action = audit.get("validation_action", "N/A")
+                conf = audit.get("validation_confidence", 0.0)
+                warnings = audit.get("validation_warnings", [])
+                val_errors = audit.get("validation_errors", [])
 
-                        st.caption(f"**Search Mode:** {search_strat.get('mode', 'unknown')} | **Query Variations:** {search_strat.get('query_variations', 0)}")
+                action_color = "#10b981" if action == "accept" else "#f59e0b" if action == "flag_for_review" else "#ef4444"
+                st.markdown(
+                    f"<span style='background-color: {action_color}; color: white; "
+                    f"padding: 0.3rem 0.8rem; border-radius: 20px; font-weight: 600;'>"
+                    f"{action.upper() if isinstance(action, str) else action}</span>",
+                    unsafe_allow_html=True,
+                )
+                st.metric("Validation Confidence", f"{conf:.2f}" if isinstance(conf, (int, float)) else str(conf))
 
-                        st.markdown("---")
-                        st.markdown("**Evidence Chunks:**")
+                if val_errors:
+                    st.markdown("**Errors:**")
+                    for err in val_errors:
+                        st.error(err)
+                if warnings:
+                    st.markdown("**Warnings:**")
+                    for w in warnings:
+                        st.warning(w)
+                if not val_errors and not warnings:
+                    st.success("No validation issues.")
 
-                        chunks = evidence_info.get('chunks', [])
-                        if chunks:
-                            for idx, chunk in enumerate(chunks, 1):
-                                with st.container():
-                                    # Metadata badge
-                                    section = chunk.get('section_id', 'unknown')
-                                    relevance = chunk.get('relevance_score', 0.0)
-                                    method = chunk.get('search_method', 'unknown')
+            with tab4:
+                grade_color = "#3b82f6" if grade == "MERIT" else "#10b981" if grade == "PASS" else "#ef4444"
+                st.markdown(
+                    f"<div style='text-align: center; margin: 1rem 0;'>"
+                    f"<span style='background-color: {grade_color}; color: white; "
+                    f"padding: 0.5rem 1.5rem; border-radius: 20px; font-weight: 700; "
+                    f"font-size: 1.2rem;'>{grade}</span></div>",
+                    unsafe_allow_html=True,
+                )
 
-                                    st.caption(f"**Chunk {idx}** | Section: `{section}` | Relevance: `{relevance:.2f}` | Method: `{method}`")
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("**Criteria Met:**")
+                    st.checkbox("Pass Criteria", value=score.get("pass_criteria_met", False), disabled=True, key=f"{ksb_code}_pass")
+                    st.checkbox("Merit Criteria", value=score.get("merit_criteria_met", False), disabled=True, key=f"{ksb_code}_merit")
+                with c2:
+                    st.markdown("**Assessment Metrics:**")
+                    st.metric("Evidence Strength", score.get("evidence_strength", "N/A"))
+                    st.metric("Confidence", confidence)
 
-                                    # Chunk text with theme-adaptive styling
-                                    chunk_text = chunk.get('text', '')
-                                    if chunk_text:
-                                        # Truncate if too long
-                                        display_text = chunk_text if len(chunk_text) <= 500 else chunk_text + "..."
-                                        # Use theme-compatible semi-transparent background with border accent
-                                        st.markdown(
-                                            f"<div style='background-color: rgba(255,255,255,0.05); color: inherit; "
-                                            f"padding: 10px; border-radius: 5px; border-left: 3px solid #4CAF50; "
-                                            f"margin-bottom: 0.5rem; font-family: monospace; font-size: 0.9em;'>"
-                                            f"{display_text}</div>",
-                                            unsafe_allow_html=True
-                                        )
-                                    else:
-                                        st.caption("_(No text)_")
-                        else:
-                            st.info("No evidence chunks available")
+                st.caption(f"**Extraction Method:** {score.get('extraction_method', 'N/A')}")
+                if score.get("placeholder_detected"):
+                    st.warning("Placeholder content detected in evidence.")
+                if score.get("adversarial_detected"):
+                    st.error("Adversarial content detected for this KSB.")
 
-                    # Tab 2: LLM Reasoning
-                    with tab2:
-                        llm_info = audit.get('llm_evaluation', {})
 
-                        col1, col2 = st.columns(2)
-                        col1.metric("Evidence Summary Length", f"{llm_info.get('evidence_summary_length', 0)} chars")
-                        col2.metric("Model", llm_info.get('model', 'unknown'))
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Export helpers
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-                        st.markdown("---")
-                        st.markdown("**Full LLM Response:**")
+def _export_csv(
+    ksb_scores: dict, ksb_feedback: dict,
+    overall_recommendation: str, module_code: str,
+) -> str:
+    """Generate CSV export from graph results."""
+    output = StringIO()
+    writer = csv.writer(output)
 
-                        raw_response = llm_info.get('raw_response', '')
-                        if raw_response:
-                            st.code(raw_response, language="text")
-                        else:
-                            st.info("No LLM response captured")
+    writer.writerow([
+        "KSB Code", "Grade", "Confidence", "Evidence Strength",
+        "Pass Met", "Merit Met", "Extraction Method",
+        "Strengths", "Improvements", "Rationale",
+    ])
 
-                    # Tab 3: Validation
-                    with tab3:
-                        val_info = audit.get('validation', {})
-                        action = val_info.get('action', 'unknown')
-                        conf = val_info.get('confidence', 0.0)
-                        warnings = val_info.get('warnings', [])
-                        retried = val_info.get('retried', False)
+    for code in sorted(ksb_scores.keys()):
+        s = ksb_scores[code]
+        fb = ksb_feedback.get(code, {})
+        strengths = _normalize_feedback_items(fb.get("strengths", []))
+        improvements = _normalize_feedback_items(fb.get("improvements", []))
+        writer.writerow([
+            code,
+            s.get("grade", ""),
+            s.get("confidence", ""),
+            s.get("evidence_strength", ""),
+            s.get("pass_criteria_met", ""),
+            s.get("merit_criteria_met", ""),
+            s.get("extraction_method", ""),
+            " | ".join(strengths),
+            " | ".join(improvements),
+            s.get("rationale", "")[:200],
+        ])
 
-                        # Colored badge for validation action
-                        action_color = "#10b981" if action == "accept" else "#f59e0b" if action == "flag_for_review" else "#ef4444"
-                        st.markdown(f"<span style='background-color: {action_color}; color: white; padding: 0.3rem 0.8rem; border-radius: 20px; font-weight: 600;'>{action.upper()}</span>", unsafe_allow_html=True)
+    grades = [s["grade"] for s in ksb_scores.values()]
+    writer.writerow([])
+    writer.writerow(["SUMMARY"])
+    writer.writerow(["Module", module_code])
+    writer.writerow(["Overall", overall_recommendation])
+    writer.writerow(["Merit", grades.count("MERIT")])
+    writer.writerow(["Pass", grades.count("PASS")])
+    writer.writerow(["Referral", grades.count("REFERRAL")])
 
-                        st.metric("Validation Confidence", f"{conf:.2f}")
+    return output.getvalue()
 
-                        if retried:
-                            st.warning("⚠️ Response was retried due to validation failure")
 
-                        st.markdown("---")
+def _normalize_feedback_items(items) -> list[str]:
+    """Convert mixed feedback item formats into displayable strings."""
+    normalized = []
+    for item in items or []:
+        if isinstance(item, dict):
+            text = (
+                item.get("suggestion")
+                or item.get("strength")
+                or item.get("area")
+                or item.get("evidence")
+                or str(item)
+            )
+        else:
+            text = str(item)
 
-                        if warnings:
-                            st.markdown("**Validation Warnings:**")
-                            for idx, warning in enumerate(warnings, 1):
-                                st.warning(f"{idx}. {warning}")
-                        else:
-                            st.success("✓ No validation warnings")
+        text = text.strip()
+        if text:
+            normalized.append(text)
 
-                    # Tab 4: Grade Decision
-                    with tab4:
-                        decision = audit.get('grade_decision', {})
+    return normalized
 
-                        final_grade = decision.get('grade', 'UNKNOWN')
-                        grade_color = "#10b981" if final_grade == "MERIT" else "#3b82f6" if final_grade == "PASS" else "#ef4444"
-                        st.markdown(f"<div style='text-align: center; margin: 1rem 0;'><span style='background-color: {grade_color}; color: white; padding: 0.5rem 1.5rem; border-radius: 20px; font-weight: 700; font-size: 1.2rem;'>{final_grade}</span></div>", unsafe_allow_html=True)
 
-                        col1, col2 = st.columns(2)
+def export_results_to_csv(results: dict, module_code: str = "") -> str:
+    """Backward-compatible CSV export helper used by local verification scripts."""
+    if not results:
+        return ""
 
-                        with col1:
-                            st.markdown("**Criteria Met:**")
-                            pass_met = decision.get('pass_criteria_met', False)
-                            merit_met = decision.get('merit_criteria_met', False)
-                            st.checkbox("Pass Criteria", value=pass_met, disabled=True, key=f"{ksb_code}_pass_check")
-                            st.checkbox("Merit Criteria", value=merit_met, disabled=True, key=f"{ksb_code}_merit_check")
+    if "ksb_scores" in results:
+        resolved_module = module_code or results.get("module_code", "UNKNOWN")
+        return _export_csv(
+            results.get("ksb_scores", {}),
+            results.get("ksb_feedback", {}),
+            results.get("overall_recommendation", "UNKNOWN"),
+            resolved_module,
+        )
 
-                        with col2:
-                            st.markdown("**Assessment Metrics:**")
-                            st.metric("Evidence Strength", decision.get('evidence_strength', 'unknown'))
-                            st.metric("Confidence", decision.get('confidence', 'unknown'))
+    scoring_results = results.get("scoring_results", [])
+    feedback_results = results.get("feedback_results", [])
+    overall_summary = results.get("overall_summary", {})
 
-                        st.caption(f"**Extraction Method:** {decision.get('extraction_method', 'unknown')}")
+    ksb_scores = {}
+    for item in scoring_results:
+        code = item.get("ksb_code")
+        if not code:
+            continue
+        ksb_scores[code] = {
+            "grade": item.get("grade", ""),
+            "confidence": item.get("confidence", ""),
+            "evidence_strength": item.get("evidence_strength", ""),
+            "pass_criteria_met": item.get("pass_criteria_met", item.get("pass_met", "")),
+            "merit_criteria_met": item.get("merit_criteria_met", item.get("merit_met", "")),
+            "extraction_method": item.get("extraction_method", ""),
+            "rationale": item.get("rationale", ""),
+        }
 
+    ksb_feedback = {}
+    for item in feedback_results:
+        code = item.get("ksb_code")
+        if not code:
+            continue
+        ksb_feedback[code] = {
+            "strengths": _normalize_feedback_items(item.get("strengths", [])),
+            "improvements": _normalize_feedback_items(item.get("improvements", [])),
+            "formatted_markdown": item.get("formatted_markdown") or item.get("formatted_feedback", ""),
+        }
+
+    resolved_module = (
+        module_code
+        or results.get("module_code")
+        or overall_summary.get("module_code")
+        or "UNKNOWN"
+    )
+
+    csv_output = _export_csv(
+        ksb_scores,
+        ksb_feedback,
+        overall_summary.get("overall_recommendation", "UNKNOWN"),
+        resolved_module,
+    )
+
+    if not overall_summary:
+        return csv_output
+
+    output = StringIO()
+    output.write(csv_output)
+    writer = csv.writer(output)
+
+    writer.writerow([])
+    writer.writerow(["OVERALL SUMMARY"])
+    writer.writerow(["Total KSBs", overall_summary.get("total_ksbs", len(ksb_scores))])
+    writer.writerow(["Merit Count", overall_summary.get("merit_count", 0)])
+    writer.writerow(["Pass Count", overall_summary.get("pass_count", 0)])
+    writer.writerow(["Referral Count", overall_summary.get("referral_count", 0)])
+    writer.writerow(["Overall Recommendation", overall_summary.get("overall_recommendation", "UNKNOWN")])
+    writer.writerow(["Confidence", overall_summary.get("confidence", "")])
+
+    key_strengths = _normalize_feedback_items(overall_summary.get("key_strengths", []))
+    if key_strengths:
+        writer.writerow([])
+        writer.writerow(["KEY STRENGTHS"])
+        for item in key_strengths:
+            writer.writerow([item])
+
+    priority_improvements = _normalize_feedback_items(overall_summary.get("priority_improvements", []))
+    if priority_improvements:
+        writer.writerow([])
+        writer.writerow(["PRIORITY IMPROVEMENTS"])
+        for item in priority_improvements:
+            writer.writerow([item])
+
+    return output.getvalue()
 
 def main():
     init_session_state()
-    
-    st.markdown('<p class="main-header">🤖 KSB Coursework Marker</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Three-Agent Assessment System</p>', unsafe_allow_html=True)
-    
-    # Sidebar
+
+    st.markdown('<p class="main-header">KSB Coursework Marker</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Evidence-Led Coursework Review</p>', unsafe_allow_html=True)
+
+    # â”€â”€ Sidebar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     with st.sidebar:
-        st.markdown("## ⚡ Status")
-        
+        st.markdown("## Status")
+
         llm = load_ollama_client()
         embedder = load_embedder()
         image_processor = load_image_processor()
-        
+
         if llm:
-            st.success(f"✓ Ollama: {OLLAMA_MODEL}")
+            st.success(f"Ollama: {OLLAMA_MODEL}")
         else:
-            st.error("✗ Ollama not connected")
-        
+            st.error("Ollama not connected")
+
         if embedder:
-            st.success(f"✓ Embedder ({embedder.embedding_dim}d)")
+            st.success(f"Embedder ({embedder.embedding_dim}d)")
         else:
-            st.error("✗ Embedder error")
-        
+            st.error("Embedder error")
+
         if image_processor:
-            st.success("✓ Vision ready")
-        
+            st.success("Vision ready")
+
         st.markdown("---")
-        
+
         # Module selection
-        st.markdown("## 📚 Module")
+        st.markdown("## Module")
         modules = get_available_modules()
-        module_options = {code: info['name'] for code, info in modules.items()}
-        selected = st.selectbox("Module", list(module_options.keys()), format_func=lambda x: module_options[x],
-                               index=list(module_options.keys()).index(st.session_state.selected_module))
-        
+        module_options = {code: info["name"] for code, info in modules.items()}
+        selected = st.selectbox(
+            "Module",
+            list(module_options.keys()),
+            format_func=lambda x: module_options[x],
+            index=list(module_options.keys()).index(st.session_state.selected_module),
+        )
+
         if selected != st.session_state.selected_module:
             st.session_state.selected_module = selected
             st.session_state.ksb_criteria = None
             st.session_state.assignment_brief = None
+            st.session_state.assignment_brief_source = "default"
+            st.session_state.assignment_brief_filename = None
             st.rerun()
-        
+
+        uploaded_brief = st.file_uploader(
+            "Assignment brief (optional)",
+            type=["docx", "pdf", "txt"],
+            key=f"assignment_brief_{selected}",
+            help=(
+                "Upload the actual assignment brief for this module. "
+                "If omitted, the built-in default brief will be used."
+            ),
+        )
+
+        if uploaded_brief:
+            brief_changed = (
+                st.session_state.assignment_brief_source != "upload"
+                or st.session_state.assignment_brief_filename != uploaded_brief.name
+            )
+            if brief_changed:
+                with st.spinner("Parsing assignment brief..."):
+                    parsed_brief = process_assignment_brief(uploaded_brief, selected)
+                    if parsed_brief:
+                        st.session_state.assignment_brief = parsed_brief
+                        st.session_state.assignment_brief_source = "upload"
+                        st.session_state.assignment_brief_filename = uploaded_brief.name
+                        st.session_state.assessment_complete = False
+                        st.session_state.agent_results = None
+        elif st.session_state.assignment_brief_source == "upload":
+            st.session_state.assignment_brief = None
+            st.session_state.assignment_brief_source = "default"
+            st.session_state.assignment_brief_filename = None
+            st.session_state.assessment_complete = False
+            st.session_state.agent_results = None
+
         if st.session_state.ksb_criteria is None:
             st.session_state.ksb_criteria = get_module_criteria(selected)
-        
-        if HAS_BRIEF and st.session_state.assignment_brief is None:
+
+        if st.session_state.assignment_brief is None:
             st.session_state.assignment_brief = get_default_brief(selected)
-        
-        st.caption(f"{len(st.session_state.ksb_criteria)} KSBs")
-        
+
+        brief_obj = st.session_state.assignment_brief
+        if hasattr(brief_obj, "tasks"):
+            brief_tasks = len(brief_obj.tasks)
+        elif isinstance(brief_obj, dict):
+            brief_tasks = len(brief_obj.get("tasks", []))
+        else:
+            brief_tasks = 0
+
+        brief_label = st.session_state.assignment_brief_filename or "Built-in default"
+        st.caption(f"{len(st.session_state.ksb_criteria)} KSBs | Brief: {brief_tasks} tasks")
+        st.caption(f"Brief source: {st.session_state.assignment_brief_source} ({brief_label})")
+
         st.markdown("---")
-        st.session_state.verbose_mode = st.checkbox("Verbose mode", value=st.session_state.verbose_mode)
+        st.session_state.verbose_mode = st.checkbox(
+            "Verbose mode", value=st.session_state.verbose_mode
+        )
 
-        if st.button("🔄 Reset"):
-            for key in ['report_data', 'agent_results', 'assessment_complete', 'current_phase']:
-                st.session_state[key] = None if key != 'assessment_complete' else False
+        if st.button("Reset Session"):
+            for key in ["report_data", "agent_results", "assessment_complete"]:
+                st.session_state[key] = None if key != "assessment_complete" else False
             st.rerun()
 
-        # Reset index button (needed after embedding model upgrade)
-        if st.button("🗑️ Reset Index", help="Delete vector index (use after upgrading embedding model)"):
-            import shutil
-            from config import INDEX_DIR
-            index_dirs = [
-                INDEX_DIR,
-                INDEX_DIR.parent / "indexes_e5-base-v2",
-                INDEX_DIR.parent / "indexes"
-            ]
-            deleted_count = 0
-            for idx_dir in index_dirs:
-                if idx_dir.exists():
-                    try:
-                        shutil.rmtree(idx_dir)
-                        deleted_count += 1
-                        logger.info(f"Deleted index directory: {idx_dir}")
-                    except Exception as e:
-                        logger.warning(f"Failed to delete {idx_dir}: {e}")
-            if deleted_count > 0:
-                st.success(f"✓ Deleted {deleted_count} index director{'y' if deleted_count == 1 else 'ies'}")
-            else:
-                st.info("No index directories found to delete")
-            st.rerun()
-    
-    # Main content
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.markdown("## 📄 Upload Report")
-        uploaded_file = st.file_uploader("Student report", type=['docx', 'pdf'])
-        
-        if uploaded_file:
-            if st.session_state.report_data is None or st.session_state.report_data.get('filename') != uploaded_file.name:
-                with st.spinner("Processing..."):
-                    report_data = process_report(uploaded_file, image_processor)
-                    if report_data:
-                        st.session_state.report_data = report_data
-                        st.session_state.assessment_complete = False
-            
-            if st.session_state.report_data:
-                r = st.session_state.report_data
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Pages", r['total_pages'])
-                c2.metric("Chunks", len(r['chunks']))
-                c3.metric("Images", len(r.get('images', [])))
-    
-    with col2:
-        st.markdown("## 🤖 Agents")
-        display_agent_status(st.session_state.current_phase)
-    
-    # Run button
+    # â”€â”€ Main content â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    st.markdown("## Upload Report")
+    uploaded_file = st.file_uploader("Student report", type=["docx", "pdf"])
+
+    if uploaded_file:
+        if (st.session_state.report_data is None or
+                st.session_state.report_data.get("filename") != uploaded_file.name):
+            with st.spinner("Processing document..."):
+                report_data = process_report(uploaded_file, image_processor)
+                if report_data:
+                    st.session_state.report_data = report_data
+                    st.session_state.assessment_complete = False
+                    st.session_state.agent_results = None
+
+        if st.session_state.report_data:
+            r = st.session_state.report_data
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Title", r["title"][:30])
+            c2.metric("Pages", r["total_pages"])
+            c3.metric("Chunks", len(r["chunks"]))
+            c4.metric("Images", len(r.get("images", [])))
+
+    display_report_viewer(
+        module_code=selected,
+        module_name=module_options[selected],
+        llm=llm,
+        embedder=embedder,
+        report_data=st.session_state.report_data,
+        assignment_brief=st.session_state.assignment_brief,
+        results=st.session_state.agent_results,
+    )
+    phase_placeholder = None
+
+    # â”€â”€ Run button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     st.markdown("---")
 
-    # Validate prerequisites
-    can_run = (st.session_state.report_data and st.session_state.ksb_criteria and llm and embedder)
+    can_run = bool(
+        st.session_state.report_data
+        and st.session_state.ksb_criteria
+        and llm
+        and embedder
+        and len(st.session_state.report_data.get("chunks", [])) >= 3
+    )
 
-    # Additional validation: check chunk count
-    if can_run and st.session_state.report_data:
-        chunks_count = len(st.session_state.report_data.get('chunks', []))
-        if chunks_count < 3:
-            can_run = False
-            st.error(f"⚠️ Document has too few sections ({chunks_count} chunks). Cannot assess reliably.")
+    if not can_run and st.session_state.report_data:
+        chunk_count = len(st.session_state.report_data.get("chunks", []))
+        if chunk_count < 3:
+            st.error(f"Document has too few sections ({chunk_count} chunks). Cannot assess reliably.")
 
-    if st.button("🚀 Run Agentic Assessment", type="primary", disabled=not can_run, use_container_width=True):
+    if st.button(
+        "Run Assessment",
+        type="primary",
+        disabled=not can_run,
+        use_container_width=True,
+    ):
         progress_bar = st.progress(0, "Starting...")
-        status_placeholder = st.empty()
-        agent_placeholder = st.empty()
-        
-        # Verbose mode log container
+        status_text = st.empty()
+
         verbose_log = [] if st.session_state.verbose_mode else None
         verbose_container = None
+        verbose_text = None
         if st.session_state.verbose_mode:
-            verbose_container = st.expander("🔍 Verbose Log (Tool Calls)", expanded=True)
+            verbose_container = st.expander("Verbose Log", expanded=True)
             verbose_text = verbose_container.empty()
-        
-        def update_progress(msg, pct, phase):
-            st.session_state.current_phase = phase
-            progress_bar.progress(pct, msg)
-            with agent_placeholder:
-                display_agent_status(phase)
-            # Update verbose log display
-            if verbose_log and verbose_container:
-                verbose_text.code("\n".join(verbose_log[-30:]), language="text")
-        
+
         try:
-            results = run_agent_pipeline(
-                st.session_state.report_data,
-                st.session_state.ksb_criteria,
-                st.session_state.assignment_brief,
-                llm, embedder, update_progress,
-                verbose_log=verbose_log
+            results = run_langgraph_pipeline(
+                report_data=st.session_state.report_data,
+                ksb_criteria=st.session_state.ksb_criteria,
+                assignment_brief=st.session_state.assignment_brief,
+                embedder=embedder,
+                module_code=st.session_state.selected_module,
+                progress_bar=progress_bar,
+                status_text=status_text,
+                phase_placeholder=phase_placeholder,
+                verbose_log=verbose_log,
             )
-            
-            st.session_state.agent_results = results
-            st.session_state.assessment_complete = True
-            st.session_state.current_phase = "complete"
-            
-            # Final verbose log
-            if verbose_log and verbose_container:
-                verbose_text.code("\n".join(verbose_log), language="text")
-            
-            st.rerun()
-            
+
+            if results:
+                st.session_state.agent_results = results
+                st.session_state.assessment_complete = True
+
+                if verbose_log and verbose_text:
+                    verbose_text.code("\n".join(verbose_log), language="text")
+
+                st.rerun()
+
         except Exception as e:
             logger.exception("Pipeline error")
             st.error(f"Error: {str(e)}")
-    
-    # Display results
+
+    # â”€â”€ Display results â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if st.session_state.assessment_complete and st.session_state.agent_results:
         st.markdown("---")
         display_results(st.session_state.agent_results)
@@ -892,3 +1336,14 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Test script for multi-base query retrieval improvement.
 
 Verifies that:
@@ -148,7 +148,7 @@ def test_retrieval_with_mock_chunks():
             "Based on the statistical significance (p = 0.002) and practical effect size "
             "(Cohen's d = 0.68), I recommend implementing Strategy A. The confidence "
             "interval suggests we can expect a 2-9 point improvement, which translates "
-            "to a 15-20% increase in customer satisfaction and estimated £50k annual revenue.",
+            "to a 15-20% increase in customer satisfaction and estimated Â£50k annual revenue.",
             section_number='2.3',
             page=5
         ),
@@ -176,62 +176,68 @@ def test_retrieval_with_mock_chunks():
     # Create vector store and add chunks
     with tempfile.TemporaryDirectory() as tmpdir:
         vector_store = ChromaStore(persist_directory=tmpdir)
+        try:
+            # Embed and index chunks
+            chunk_dicts = [c.to_dict() if hasattr(c, 'to_dict') else c for c in text_chunks]
+            texts = [c.get('content', '') if isinstance(c, dict) else c.content for c in chunk_dicts]
+            embeddings = embedder.embed_documents(texts)
+            vector_store.add_report(chunk_dicts, embeddings)
 
-        # Embed and index chunks
-        chunk_dicts = [c.to_dict() if hasattr(c, 'to_dict') else c for c in text_chunks]
-        texts = [c.get('content', '') if isinstance(c, dict) else c.content for c in chunk_dicts]
-        embeddings = embedder.embed_documents(texts)
-        vector_store.add_report(chunk_dicts, embeddings)
+            print(f"Indexed {len(texts)} chunks in vector store")
 
-        print(f"Indexed {len(texts)} chunks in vector store")
+            # Create retriever
+            from config import RetrievalConfig
+            retriever = Retriever(
+                embedder=embedder,
+                vector_store=vector_store,
+                report_top_k=RetrievalConfig.REPORT_TOP_K,
+                use_hybrid=True,
+                semantic_weight=0.6,
+                keyword_weight=0.4
+            )
 
-        # Create retriever
-        from config import RetrievalConfig
-        retriever = Retriever(
-            embedder=embedder,
-            vector_store=vector_store,
-            report_top_k=RetrievalConfig.REPORT_TOP_K,
-            use_hybrid=True,
-            semantic_weight=0.6,
-            keyword_weight=0.4
-        )
+            # Test retrieval for K22
+            criterion_text = "Knowledge of hypothesis testing, statistical significance, and effect sizes"
+            result = retriever.retrieve_for_criterion(criterion_text, criterion_id="K22")
 
-        # Test retrieval for K22
-        criterion_text = "Knowledge of hypothesis testing, statistical significance, and effect sizes"
-        result = retriever.retrieve_for_criterion(criterion_text, criterion_id="K22")
+            print(f"\nK22 Retrieval Results:")
+            print(f"  Query variations: {len(result.query_variations)}")
+            print(f"  Chunks retrieved: {len(result.retrieved_chunks)}")
+            print(f"  Search strategy: {result.search_strategy}")
 
-        print(f"\nK22 Retrieval Results:")
-        print(f"  Query variations: {len(result.query_variations)}")
-        print(f"  Chunks retrieved: {len(result.retrieved_chunks)}")
-        print(f"  Search strategy: {result.search_strategy}")
+            print(f"\nSample queries used:")
+            for i, q in enumerate(result.query_variations[:10], 1):
+                print(f"  {i}. {q[:60]}...")
 
-        print(f"\nSample queries used:")
-        for i, q in enumerate(result.query_variations[:10], 1):
-            print(f"  {i}. {q[:60]}...")
+            print(f"\nRetrieved chunks:")
+            for i, chunk in enumerate(result.retrieved_chunks, 1):
+                section = chunk.get('metadata', {}).get('section_number', '?')
+                similarity = chunk.get('similarity', 0)
+                preview = chunk.get('content', '')[:80].replace('\n', ' ')
+                print(f"  {i}. Section {section} (sim={similarity:.3f}): {preview}...")
 
-        print(f"\nRetrieved chunks:")
-        for i, chunk in enumerate(result.retrieved_chunks, 1):
-            section = chunk.get('metadata', {}).get('section_number', '?')
-            similarity = chunk.get('similarity', 0)
-            preview = chunk.get('content', '')[:80].replace('\n', ' ')
-            print(f"  {i}. Section {section} (sim={similarity:.3f}): {preview}...")
+            # Verify we got relevant chunks (sections 2.1, 2.2, 2.3)
+            retrieved_sections = [
+                c.get('metadata', {}).get('section_number', '')
+                for c in result.retrieved_chunks
+            ]
+            k22_sections = [s for s in retrieved_sections if s.startswith('2.')]
+            irrelevant_sections = [s for s in retrieved_sections if s.startswith('1.')]
 
-        # Verify we got relevant chunks (sections 2.1, 2.2, 2.3)
-        retrieved_sections = [
-            c.get('metadata', {}).get('section_number', '')
-            for c in result.retrieved_chunks
-        ]
-        k22_sections = [s for s in retrieved_sections if s.startswith('2.')]
-        irrelevant_sections = [s for s in retrieved_sections if s.startswith('1.')]
+            print(f"\nRelevant K22 chunks (Task 2): {len(k22_sections)}")
+            print(f"Irrelevant chunks (Task 1): {len(irrelevant_sections)}")
 
-        print(f"\nRelevant K22 chunks (Task 2): {len(k22_sections)}")
-        print(f"Irrelevant chunks (Task 1): {len(irrelevant_sections)}")
-
-        if len(k22_sections) >= 2:
-            print("\nPASS: Multi-base queries retrieved relevant K22 evidence")
-        else:
-            print("\nWARNING: Expected more K22-relevant chunks")
-
+            if len(k22_sections) >= 2:
+                print("\nPASS: Multi-base queries retrieved relevant K22 evidence")
+            else:
+                print("\nWARNING: Expected more K22-relevant chunks")
+        finally:
+            vector_store.close()
+            del vector_store
+            import gc
+            import time
+            gc.collect()
+            time.sleep(0.3)
 
 def main():
     print("\n" + "="*80)
@@ -264,3 +270,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+

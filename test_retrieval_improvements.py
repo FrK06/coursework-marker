@@ -1,4 +1,4 @@
-"""
+﻿"""
 Test script for retrieval improvements:
 1. Verify hybrid search fusion is correct (should already be)
 2. Verify chunk headers are properly formatted
@@ -76,12 +76,11 @@ def test_chunk_headers():
     chunks_with_headers = sum(1 for c in result_chunks if c.content.startswith('[Section'))
     print(f"Chunks with structured headers: {chunks_with_headers}/{len(result_chunks)}")
 
-    if chunks_with_headers >= len(result_chunks) - 1:  # Allow for potential edge cases
-        print("✓ PASS: Chunk headers are properly formatted")
-    else:
-        print("✗ FAIL: Not all chunks have headers")
-
-    return result_chunks
+    assert result_chunks, "Expected chunker to produce at least one chunk"
+    assert chunks_with_headers >= len(result_chunks) - 1, (
+        f"Expected most chunks to have structured headers, got {chunks_with_headers}/{len(result_chunks)}"
+    )
+    print("âœ“ PASS: Chunk headers are properly formatted")
 
 
 def test_hybrid_fusion():
@@ -92,12 +91,12 @@ def test_hybrid_fusion():
 
     # This is already correct in the code, just document it
     print("\nHybrid fusion implementation review:")
-    print("  - _reciprocal_rank_fusion() returns List[Tuple[str, float]] ✓")
-    print("  - Semantic RRF computed across all query variations ✓")
-    print("  - Keyword RRF computed across all query variations ✓")
-    print("  - Final score = 0.6 * semantic_rrf + 0.4 * keyword_rrf ✓")
-    print("  - Results sorted by final score descending ✓")
-    print("\n✓ PASS: Hybrid fusion is already correctly implemented")
+    print("  - _reciprocal_rank_fusion() returns List[Tuple[str, float]] âœ“")
+    print("  - Semantic RRF computed across all query variations âœ“")
+    print("  - Keyword RRF computed across all query variations âœ“")
+    print("  - Final score = 0.6 * semantic_rrf + 0.4 * keyword_rrf âœ“")
+    print("  - Results sorted by final score descending âœ“")
+    print("\nâœ“ PASS: Hybrid fusion is already correctly implemented")
     print("         (Lines 432-443 in src/retrieval/retriever.py)")
 
 
@@ -115,8 +114,8 @@ def main():
     print("\n" + "="*80)
     print("SUMMARY")
     print("="*80)
-    print("\n✓ Improvement 1: Hybrid fusion - Already correct, no changes needed")
-    print("✓ Improvement 2: Chunk headers - Updated with structured format")
+    print("\nâœ“ Improvement 1: Hybrid fusion - Already correct, no changes needed")
+    print("âœ“ Improvement 2: Chunk headers - Updated with structured format")
     print("\nChunk header format: [Section X.X | Parent Section Title]")
     print("  - Section number from chunk metadata (or '?' if missing)")
     print("  - Parent title from level-1 heading (or chunk's own title if missing)")

@@ -1,5 +1,5 @@
-"""
-LLM Module - Ollama client for local inference with Gemma3:4B.
+﻿"""
+LLM Module - Ollama client for local inference.
 """
 from .ollama_client import OllamaClient
 

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Basic tests for the Coursework Marker Assistant pipeline.
 
 Run with: pytest tests/test_pipeline.py -v
@@ -111,7 +111,15 @@ class TestVectorStore:
                 criteria_collection="test_criteria",
                 report_collection="test_report"
             )
-            yield store
+            try:
+                yield store
+            finally:
+                store.close()
+                del store
+                import gc
+                import time
+                gc.collect()
+                time.sleep(0.3)
     
     def test_store_initialization(self, temp_store):
         stats = temp_store.get_stats()
@@ -242,3 +250,5 @@ class TestIntegration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
